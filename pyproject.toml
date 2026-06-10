@@ -1,0 +1,9 @@
+[project]
+name = "call_me_maybe"
+version = "v1.0.0"
+
+dependencies = [
+    "flake8",
+    "mypy",
+    "wget"
+]

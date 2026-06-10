@@ -1,1 +1,5 @@
 venv/
+.venv/
+llm_sdk/
+data/
+en.subject.pdf
