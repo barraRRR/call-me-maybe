@@ -5,5 +5,7 @@ version = "v1.0.0"
 dependencies = [
     "flake8",
     "mypy",
-    "wget"
+    "wget",
+    "pydantic",
+    "numpy"
 ]
