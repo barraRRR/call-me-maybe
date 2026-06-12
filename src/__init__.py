@@ -1,0 +1,5 @@
+__version__ = "v1.0.0"
+__author__ = "Javier Barreiro"
+__42login__ = "jbarreir"
+__email__ = "jbarreir@student.42madrid.com"
+__description__ = "A function calling tool that translates natural language prompts into structured function calls."
