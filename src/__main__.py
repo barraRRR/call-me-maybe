@@ -5,6 +5,11 @@ import numpy as np
 import json
 import argparse
 import os
+from src import __description__
+
+
+TOKENIZER_PATH = "src/tokenizer.json"                   # attention: manejar esto bien antes de entregar
+BASE_PROMPT_PATH = "src/BASE_PROMPT.txt"                # attention: terminar de definar correctamente esto antes de entregar
 
 
 class ParameterInfo(BaseModel):
@@ -33,20 +38,40 @@ class FunctionCallResult(BaseModel):
 class ModelEngine(Small_LLM_Model):
     """
     """
-    TEST_TOKENIZER_PATH = "debug/test_tokenizer.json"
-
-    def __init__(self, model_name: str = "Qwen/Qwen3-0.6B", **kwargs) -> None:
+    def __init__(
+            self,
+            func_def_path: str,
+            test_prompts_path: str,
+            model_name: str = "Qwen/Qwen3-0.6B",
+            **kwargs: Any) -> None:
         super().__init__(model_name=model_name, **kwargs)
 
-        tokenizer = self.get_path_to_tokenizer_file()
-        with open(tokenizer, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        print("Initializing model...\nLooking for tokenizer file... ", end="")
+        if os.path.exists(TOKENIZER_PATH):
+            print("FOUND!\nLoading data from tokenizer file...")
+            with open(TOKENIZER_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
         
-        os.makedirs(os.path.dirname(self.TEST_TOKENIZER_PATH), exist_ok=True)
-        with open(self.TEST_TOKENIZER_PATH, "w") as f:
-            json.dump(data, f, indent=2)
+        else:
+            print("NOT FOUND\nAccesing to Hugging Face Server... ", end="")
+            tokenizer = self.get_path_to_tokenizer_file()
+            print("OK")
+            with open(tokenizer, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            print("Loading data from tokenizer file...")
 
-    def load_functions_definition(self, path: str) -> None:
+            os.makedirs(os.path.dirname(TOKENIZER_PATH), exist_ok=True)
+            with open(TOKENIZER_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+        
+        vocab_dict: Dict[str, int] = data["model"]["vocab"]
+        self.id_to_token: Dict[int, str] = {v: k for k, v in vocab_dict.items()}
+
+        self._load_functions_definition(func_def_path)
+        self._load_test_prompts(test_prompts_path)
+        self._load_base_prompt()
+
+    def _load_functions_definition(self, path: str) -> None:
         """
         """
         try:
@@ -54,6 +79,11 @@ class ModelEngine(Small_LLM_Model):
                 # Desempaquetamos el diccionario para instanciar el modelo de Pydantic
                 raw = json.load(file)
                 self.func_def: List[FunctionSchema] = [FunctionSchema(**f) for f in raw]
+                self.func_def_text: str = json.dumps(
+                    [f.model_dump() for f in self.func_def],
+                    indent=2,
+                    ensure_ascii=False
+                )
 
         except FileNotFoundError:
             print(f"[Error] Couldn't find {path}")        # implementar excepciones
@@ -61,7 +91,7 @@ class ModelEngine(Small_LLM_Model):
         except json.JSONDecodeError:
             print(f"[ERROR] Couldn't parse JSON in {path}")        # implementar excepciones
 
-    def load_test_prompts(self, path: str) -> None:
+    def _load_test_prompts(self, path: str) -> None:
         """
         """
         try:
@@ -75,19 +105,23 @@ class ModelEngine(Small_LLM_Model):
         except json.JSONDecodeError:
             print(f"[ERROR] Couldn't parse JSON in {path}")        # implementar excepciones
 
-    def load_base_prompt(self, path: str = "BASE_PROMPT.txt") -> None:
+    def _load_base_prompt(self) -> None:
         """
         """
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw: str = json.load(f)
-                self.base_prompt: str = raw
+            with open(BASE_PROMPT_PATH, "r", encoding="utf-8") as f:
+                self.base_prompt: str = f.read()
+            
+            self.base_prompt = self.base_prompt.format(
+            functions_context=self.func_def_text,
+            user_query=self.test_prompts[0]             # TEMP
+            )
 
         except FileNotFoundError:
-            print(f"[Error] Couldn't find {path}")        # implementar excepciones
+            print(f"[Error] Couldn't find {BASE_PROMPT_PATH}")        # implementar excepciones
 
         except json.JSONDecodeError:
-            print(f"[ERROR] Couldn't parse JSON in {path}")        # implementar excepciones
+            print(f"[ERROR] Couldn't parse JSON in {BASE_PROMPT_PATH}")        # implementar excepciones
 
     def generate(self, prompt: str, max_new_tokens: int = 50) -> str:
         """
@@ -104,20 +138,8 @@ class ModelEngine(Small_LLM_Model):
             
             logits = self.get_logits_from_input_ids(tokens_list)
             
-            # Identificamos la forma del tensor/array para extraer correctamente la probabilidad del vocabulario
-            if hasattr(logits, "ndim") and logits.ndim == 3:
-                last_logits = logits[0, -1, :]  # [batch, seq, vocab] -> Extrae el último token
-            elif hasattr(logits, "ndim") and logits.ndim == 2:
-                last_logits = logits[-1, :]     # [seq, vocab] -> Extrae el último token
-            else:
-                last_logits = logits            # [vocab] -> Asumimos que ya es el array 1D
-                
-            # Convertimos de PyTorch a NumPy de forma segura (si fuera necesario) antes del argmax
-            if hasattr(last_logits, "detach"):
-                last_logits = last_logits.detach().cpu().numpy()
-            
             # C. Buscamos el índice (el ID del token) con la puntuación más alta
-            next_token = int(np.argmax(last_logits))
+            next_token = int(np.argmax(logits))
             
             # D. Comprobamos si el modelo ha decidido terminar de hablar
             if next_token == EOS_TOKEN_ID:
@@ -135,22 +157,31 @@ class ModelEngine(Small_LLM_Model):
 def main() -> None:
     """
     """
-    parser = argparse.ArgumentParser(description="A function calling tool that translates natural language prompts into structured function calls.")
+    parser = argparse.ArgumentParser(description=__description__)
     parser.add_argument("--functions_definition", default="data/input/functions_definition.json")
     parser.add_argument("--input", default="data/input/function_calling_tests.json")
     parser.add_argument("--output", default="data/output/function_calls.json")
     arg = parser.parse_args()
     
 
-    model = ModelEngine()
-    model.load_functions_definition(arg.functions_definition)
-    model.load_test_prompts(arg.input)
+    model = ModelEngine(
+        func_def_path=arg.functions_definition,
+        test_prompts_path=arg.input,
+    )
+    """
+    print("\n" + " MODEL TEST PROMPTS ".center(60, "="))
+    print(model.test_prompts)
 
-    generated_text = model.generate(model.base_promt, 200)
+    print("\n" + " FUNC DEFINITIONS ".center(60, "="))
+    print(model.func_def)
 
-    print("\n" + " TEST 02 ".center(60, "="))
-    print(f"ENCODING      : {TEST_02}")
-    print(f"RESPONSE      :", generated_text)
+    print("\n" + " FORMATED PROMPT ".center(60, "="))
+    print(model.base_prompt)
+    """
+    generated_text = model.generate(model.base_prompt)
+
+    print("\n" + " GENERATION TEST ".center(60, "="))
+    print(generated_text)
 
 
 if __name__ == "__main__":
