@@ -10,6 +10,7 @@ from src import __description__
 
 TOKENIZER_PATH = "src/tokenizer.json"                   # attention: manejar esto bien antes de entregar
 BASE_PROMPT_PATH = "src/BASE_PROMPT.txt"                # attention: terminar de definar correctamente esto antes de entregar
+EOS_TOKEN_ID = 151645
 
 
 class ParameterInfo(BaseModel):
@@ -130,9 +131,6 @@ class ModelEngine(Small_LLM_Model):
         
         # Al saber que es un torch.Tensor, podemos aplanarlo a 1D y convertirlo a lista nativa
         tokens_list = tokens.flatten().tolist()
-
-        # Cambiamos a <|im_end|> que es el finalizador habitual en modo Chat para Qwen
-        EOS_TOKEN_ID = 151645
 
         for _ in range(max_new_tokens):
             
