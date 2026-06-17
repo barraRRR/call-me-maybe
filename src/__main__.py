@@ -152,11 +152,9 @@ class ModelEngine(Small_LLM_Model):
         try:
             with open(BASE_PROMPT_PATH, "r", encoding="utf-8") as f:
                 self.base_prompt: str = f.read()
-            
-            self.base_prompt = self.base_prompt.format(
-            functions_context=self.func_def_text,
-            user_prompt=self.test_prompts[1]
-            )
+                self.base_prompt = self.base_prompt.format(
+                    functions_context=self.func_def_text
+                    )
 
         except FileNotFoundError:
             print(f"[Error] Couldn't find {BASE_PROMPT_PATH}")        # implementar excepciones
@@ -164,15 +162,30 @@ class ModelEngine(Small_LLM_Model):
         except json.JSONDecodeError:
             print(f"[ERROR] Couldn't parse JSON in {BASE_PROMPT_PATH}")        # implementar excepciones
 
-    def generate(self, prompt: str, max_new_tokens: int = 50) -> str:
+    def _compose_base_prompt_with_user_prompt(self, user_promp: str) -> str:
         """
         """
+        return (
+            self.base_prompt + '"' + user_promp + '"\n' + "JSON Output:"
+        )
+
+    def generate(
+            self,
+            max_new_tokens: int = 50,
+            user_prompt: str = Optional[str]) -> str:
+        """
+        """
+        if user_prompt is None:
+            user_prompt = self.test_prompts[0]
+
+        prompt = self._compose_base_prompt_with_user_prompt(user_prompt)
+        
         prompt_tokens = self.encode(prompt).flatten().tolist()
         len_prompt = len(prompt_tokens)
         tokens_list = prompt_tokens.copy()
 
         traker = JSONStateTracker(
-            user_prompt=self.test_prompts[1],
+            user_prompt=user_prompt,
             func_def_dict=self.func_def_dict
         )
 
@@ -193,6 +206,13 @@ class ModelEngine(Small_LLM_Model):
                 break
 
             tokens_list.append(next_token)
+            current_text = self.decode(tokens_list[len_prompt:])
+
+            try:
+                json.loads(current_text)
+                break
+            except json.JSONDecodeError:
+                continue
 
         return self.decode(tokens_list[len_prompt:])
 
@@ -217,21 +237,21 @@ def main() -> None:
         func_def_path=arg.functions_definition,
         test_prompts_path=arg.input,
     )
-    
-    """
-    print("\n" + " MODEL TEST PROMPTS ".center(60, "="))
-    print(model.test_prompts)
+    for i, test in enumerate(model.test_prompts):
+        test_model(model, test, test_num=i)
 
-    print("\n" + " FUNC DEFINITIONS ".center(60, "="))
-    print(model.func_def_text)
-    
-    print("\n" + " FORMATED PROMPT ".center(60, "="))
-    print(model.base_prompt)
-    """
-    generated_text = model.generate(model.base_prompt)
 
-    print("\n" + " GENERATION TEST ".center(60, "="))
-    print(generated_text)
+def test_model(
+        model: ModelEngine,
+        test: str,
+        test_num: int = 0) -> None:
+    """
+    """
+    generated_text = model.generate(user_prompt=test)
+    print("\n" + f" GENERATION_TEST_{test_num:02d} ".center(60, "="))
+    print("PROMPT: ", test)
+    print("ANSWER: ", generated_text)
+
 
 
 if __name__ == "__main__":
