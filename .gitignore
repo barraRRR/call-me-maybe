@@ -5,3 +5,4 @@ data/
 en.subject.pdf
 __pycache__
 assets/
+.env

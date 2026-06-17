@@ -5,6 +5,7 @@ import numpy as np
 import json
 import argparse
 import os
+import re
 from src import __description__
 
 
@@ -36,6 +37,38 @@ class FunctionCallResult(BaseModel):
     parameters: Dict[str, Any]
 
 
+class JSONStateTracker:
+    """
+    """
+    def __init__(
+            self,
+            user_prompt: str,
+            func_def_dict: List[FunctionSchema]
+            ) -> None:
+        self.user_promp: str = user_prompt
+        self.func_def_dic: Dict[str, FunctionSchema] = func_def_dict
+
+    def mask(
+            self,
+            generated_text: str,
+            logits: int,
+            id_to_token: Dict[int, str]
+            ) -> List[float]:
+        """
+        """
+        if len(generated_text) == 0:
+            for token_id, token_str in id_to_token.items():
+                if token_str != "{":
+                    logits[token_id] = -float("inf")
+
+        elif generated_text.endswith("{"):
+            for token_id, token_str in id_to_token.items():
+                if token_str != '"':
+                    logits[token_id] = -float("inf")
+
+        return logits
+
+
 class ModelEngine(Small_LLM_Model):
     """
     """
@@ -59,14 +92,17 @@ class ModelEngine(Small_LLM_Model):
             print("OK")
             with open(tokenizer, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            print("Loading data from tokenizer file...")
+            print("Downloading tokenizer file...")
 
             os.makedirs(os.path.dirname(TOKENIZER_PATH), exist_ok=True)
             with open(TOKENIZER_PATH, "w") as f:
                 json.dump(data, f, indent=2)
+            print("Loading data from tokenizer file...")
         
-        vocab_dict: Dict[str, int] = data["model"]["vocab"]
-        self.id_to_token: Dict[int, str] = {v: k for k, v in vocab_dict.items()}
+        self.vocab_dict: Dict[str, int] = data["model"]["vocab"]
+        self.id_to_token: Dict[int, str] = {
+            v: k for k, v in self.vocab_dict.items()
+            }
 
         self._load_functions_definition(func_def_path)
         self._load_test_prompts(test_prompts_path)
@@ -77,20 +113,24 @@ class ModelEngine(Small_LLM_Model):
         """
         try:
             with open(path, "r") as file:
-                # Desempaquetamos el diccionario para instanciar el modelo de Pydantic
                 raw = json.load(file)
-                self.func_def: List[FunctionSchema] = [FunctionSchema(**f) for f in raw]
+                self.func_def: List[FunctionSchema] = [
+                    FunctionSchema(**f) for f in raw
+                    ]
                 self.func_def_text: str = json.dumps(
                     [f.model_dump() for f in self.func_def],
-                    indent=2,
+                    separators=(',', ':'),
                     ensure_ascii=False
                 )
+                self.func_def_dict: Dict[str, FunctionSchema] = {
+                    func.name: func for func in self.func_def
+                }
 
         except FileNotFoundError:
-            print(f"[Error] Couldn't find {path}")        # implementar excepciones
+            print(f"[Error] Couldn't find {path}")                  # implementar excepciones
 
         except json.JSONDecodeError:
-            print(f"[ERROR] Couldn't parse JSON in {path}")        # implementar excepciones
+            print(f"[ERROR] Couldn't parse JSON in {path}")         # implementar excepciones
 
     def _load_test_prompts(self, path: str) -> None:
         """
@@ -101,10 +141,10 @@ class ModelEngine(Small_LLM_Model):
                 self.test_prompts: List[str] = [p["prompt"] for p in raw]
 
         except FileNotFoundError:
-            print(f"[Error] Couldn't find {path}")        # implementar excepciones
+            print(f"[Error] Couldn't find {path}")                  # implementar excepciones
 
         except json.JSONDecodeError:
-            print(f"[ERROR] Couldn't parse JSON in {path}")        # implementar excepciones
+            print(f"[ERROR] Couldn't parse JSON in {path}")         # implementar excepciones
 
     def _load_base_prompt(self) -> None:
         """
@@ -115,7 +155,7 @@ class ModelEngine(Small_LLM_Model):
             
             self.base_prompt = self.base_prompt.format(
             functions_context=self.func_def_text,
-            user_query=self.test_prompts[0]             # TEMP
+            user_prompt=self.test_prompts[1]
             )
 
         except FileNotFoundError:
@@ -127,38 +167,49 @@ class ModelEngine(Small_LLM_Model):
     def generate(self, prompt: str, max_new_tokens: int = 50) -> str:
         """
         """
-        tokens = self.encode(prompt)
-        
-        # Al saber que es un torch.Tensor, podemos aplanarlo a 1D y convertirlo a lista nativa
-        tokens_list = tokens.flatten().tolist()
+        prompt_tokens = self.encode(prompt).flatten().tolist()
+        len_prompt = len(prompt_tokens)
+        tokens_list = prompt_tokens.copy()
+
+        traker = JSONStateTracker(
+            user_prompt=self.test_prompts[1],
+            func_def_dict=self.func_def_dict
+        )
 
         for _ in range(max_new_tokens):
             
+            generated_tokens = tokens_list[len_prompt:]
+            generated_text = self.decode(generated_tokens)
+
             logits = self.get_logits_from_input_ids(tokens_list)
-            
-            # C. Buscamos el índice (el ID del token) con la puntuación más alta
+            logits = traker.mask(
+                generated_text=generated_text,
+                logits=logits,
+                id_to_token=self.id_to_token)
+
             next_token = int(np.argmax(logits))
             
-            # D. Comprobamos si el modelo ha decidido terminar de hablar
             if next_token == EOS_TOKEN_ID:
                 break
-                
-            # E. Si no ha terminado, añadimos el nuevo token a nuestra lista
-            # para que en la siguiente vuelta el modelo tenga más contexto
+
             tokens_list.append(next_token)
-            
-        # 3. Fuera del bucle, decodificamos la lista completa de vuelta a texto
-        generated_text = self.decode(tokens_list)
-        return generated_text
+
+        return self.decode(tokens_list[len_prompt:])
 
 
 def main() -> None:
     """
     """
     parser = argparse.ArgumentParser(description=__description__)
-    parser.add_argument("--functions_definition", default="data/input/functions_definition.json")
-    parser.add_argument("--input", default="data/input/function_calling_tests.json")
-    parser.add_argument("--output", default="data/output/function_calls.json")
+    parser.add_argument(
+        "--functions_definition", default="data/input/functions_definition.json"
+        )
+    parser.add_argument(
+        "--input", default="data/input/function_calling_tests.json"
+        )
+    parser.add_argument(
+        "--output", default="data/output/function_calls.json"
+        )
     arg = parser.parse_args()
     
 
@@ -166,13 +217,14 @@ def main() -> None:
         func_def_path=arg.functions_definition,
         test_prompts_path=arg.input,
     )
+    
     """
     print("\n" + " MODEL TEST PROMPTS ".center(60, "="))
     print(model.test_prompts)
 
     print("\n" + " FUNC DEFINITIONS ".center(60, "="))
-    print(model.func_def)
-
+    print(model.func_def_text)
+    
     print("\n" + " FORMATED PROMPT ".center(60, "="))
     print(model.base_prompt)
     """
