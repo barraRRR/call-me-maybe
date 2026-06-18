@@ -16,6 +16,9 @@ install:
 run:
 		uv run python -m src
 
+clean:
+		rm -rf data/output
+
 
 
 		

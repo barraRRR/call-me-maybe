@@ -54,7 +54,7 @@ class JSONStateTracker:
     def mask(
             self,
             generated_text: str,
-            logits: int,
+            logits: List[float],
             id_to_token: Dict[int, str]
             ) -> List[float]:
         """
@@ -106,6 +106,7 @@ class ModelEngine(Small_LLM_Model):
         self.id_to_token: Dict[int, str] = {
             v: k for k, v in self.vocab_dict.items()
             }
+        self.model_response_list: List[Dict[str, str]] = []
 
         self._load_functions_definition(func_def_path)
         self._load_test_prompts(test_prompts_path)
@@ -172,10 +173,24 @@ class ModelEngine(Small_LLM_Model):
             self.base_prompt + '"' + user_promp + '"\n' + "JSON Output:"
         )
 
+    def _compose_output_file(self) -> None:
+        """
+        """
+        os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                self.model_response_list,
+                fp=f,
+                indent=2,
+                ensure_ascii=False
+                )
+
     def generate(
             self,
             max_new_tokens: int = 50,
-            user_prompt: str = Optional[str]) -> str:
+            user_prompt: str = Optional[str],
+            answer_str: str = "ANSWER: ",
+            printable: bool = False) -> str:
         """
         """
         if user_prompt is None:
@@ -205,18 +220,22 @@ class ModelEngine(Small_LLM_Model):
 
             next_token = int(np.argmax(logits))
             
-            if next_token == EOS_TOKEN_ID:
-                break
+            if next_token == EOS_TOKEN_ID: break
 
             tokens_list.append(next_token)
             current_text = self.decode(tokens_list[len_prompt:])
 
-            try:
-                json.loads(current_text)
-                break
-            except json.JSONDecodeError:
-                continue
+            if printable:
+                print(f"\r{answer_str}{current_text}", end="", flush=True)
 
+            try:
+                current_json = json.loads(current_text)
+                self.model_response_list.append(current_json)
+                break
+
+            except json.JSONDecodeError: continue
+
+        self._compose_output_file()
         return self.decode(tokens_list[len_prompt:])
 
 
@@ -241,14 +260,14 @@ def main() -> None:
 def test_model(
         model: ModelEngine,
         test: str,
-        test_num: int = 0) -> None:
+        test_num: int = 0) -> str:
     """
     """
-    generated_text = model.generate(max_new_tokens=100, user_prompt=test)
     print("\n" + f" GENERATION_TEST_{test_num:02d} ".center(60, "="))
     print("PROMPT: ", test)
-    print("ANSWER: ", generated_text)
+    generated_text = model.generate(max_new_tokens=100, user_prompt=test, printable=True)
 
+    return generated_text
 
 
 if __name__ == "__main__":
