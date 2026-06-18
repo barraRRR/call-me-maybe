@@ -10,7 +10,10 @@ from src import __description__
 
 
 TOKENIZER_PATH = "src/tokenizer.json"                   # attention: manejar esto bien antes de entregar
-BASE_PROMPT_PATH = "src/BASE_PROMPT.txt"                # attention: terminar de definar correctamente esto antes de entregar
+BASE_PROMPT_PATH = "src/base_prompt.txt"                # attention: terminar de definar correctamente esto antes de entregar
+FUNC_DEF_PATH = "data/input/functions_definition.json"
+FUNC_CALL_TESTS_PATH = "data/input/function_calling_tests.json"
+OUTPUT_PATH = "data/output/function_calls.json"
 EOS_TOKEN_ID = 151645
 
 
@@ -221,15 +224,9 @@ def main() -> None:
     """
     """
     parser = argparse.ArgumentParser(description=__description__)
-    parser.add_argument(
-        "--functions_definition", default="data/input/functions_definition.json"
-        )
-    parser.add_argument(
-        "--input", default="data/input/function_calling_tests.json"
-        )
-    parser.add_argument(
-        "--output", default="data/output/function_calls.json"
-        )
+    parser.add_argument("--functions_definition", default=FUNC_DEF_PATH)
+    parser.add_argument("--input", default=FUNC_CALL_TESTS_PATH)
+    parser.add_argument("--output", default=OUTPUT_PATH)
     arg = parser.parse_args()
     
 
@@ -247,7 +244,7 @@ def test_model(
         test_num: int = 0) -> None:
     """
     """
-    generated_text = model.generate(user_prompt=test)
+    generated_text = model.generate(max_new_tokens=100, user_prompt=test)
     print("\n" + f" GENERATION_TEST_{test_num:02d} ".center(60, "="))
     print("PROMPT: ", test)
     print("ANSWER: ", generated_text)
