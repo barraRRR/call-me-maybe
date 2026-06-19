@@ -1,4 +1,4 @@
-.PHONY: install run debug clean lint
+.PHONY: install run run-edge debug clean lint
 
 install:
 		uv venv
@@ -15,6 +15,9 @@ install:
 
 run:
 		uv run python -m src
+
+run-edge:
+		uv run python -m src --input data/edge/edge_cases.json
 
 clean:
 		rm -rf data/output
