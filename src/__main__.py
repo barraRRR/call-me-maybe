@@ -269,7 +269,8 @@ class ModelEngine(Small_LLM_Model):
     def __init__(
             self,
             model_name: str = "Qwen/Qwen3-0.6B",
-            **kwargs: Any) -> None:
+            **kwargs: Any
+            ) -> None:
         super().__init__(model_name=model_name, **kwargs)
 
         print("Initializing model...\nLooking for tokenizer file... ", end="")
@@ -303,7 +304,8 @@ class ModelEngine(Small_LLM_Model):
             prompt: BasePrompt,
             max_new_tokens: int = 50,
             answer_str: str = "ANSWER: ",
-            printable: bool = False) -> str:
+            printable: bool = False
+            ) -> str:
         """
         """        
         prompt_tokens = self.encode(prompt.get()).flatten().tolist()
@@ -343,7 +345,8 @@ class ModelEngine(Small_LLM_Model):
             tracker: Optional[TokenizerMaskProtocol],
             prompt: BasePrompt,
             test: str,
-            test_num: int = 0) -> str:
+            test_num: int = 0
+            ) -> str:
         """
         """
         print("\n" + f" GENERATION_TEST_{test_num:02d} ".center(60, "="))
