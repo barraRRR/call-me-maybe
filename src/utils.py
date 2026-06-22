@@ -9,6 +9,7 @@ BASE_PROMPT_PATH = "src/base_prompt.txt"
 FUNC_DEF_PATH = "data/input/functions_definition.json"
 FUNC_CALL_TESTS_PATH = "data/input/function_calling_tests.json"
 OUTPUT_PATH = "data/output/function_calls.json"
+ERROR_MSG_PATH = "src/error_handling.json"
 EOS_TOKEN_ID = 151645
 
 

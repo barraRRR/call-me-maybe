@@ -5,7 +5,7 @@ from pydantic_core import PydanticCustomError
 from src.utils import TOKENIZER_PATH, BASE_PROMPT_PATH, FUNC_DEF_PATH
 from src.utils import OUTPUT_PATH, FUNC_CALL_TESTS_PATH, EOS_TOKEN_ID
 from src.utils import compose_output_file, debug_output_token_list
-from src.utils import is_quote_escaped, is_complete_number
+from src.utils import is_quote_escaped, is_complete_number, ERROR_MSG_PATH
 from src.utils import find_first_unescaped_quote, number_regex
 from src import __description__
 from enum import Enum
@@ -14,7 +14,18 @@ import json
 import argparse
 import os
 import sys
-import re
+
+
+def load_error_messages(path: str = ERROR_MSG_PATH) -> Dict[str, str]:
+    """Loads error templates from JSON or returns a fallback mapping if missing."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        print("ERROR: error_handling.json missing.")
+        sys.exit(1)
+
+ERRORS = load_error_messages()
 
 
 class ParameterInfo(BaseModel):
@@ -50,10 +61,13 @@ class DynamicFunctionDefinitions:
         self.func_def_dict: Dict[str, FunctionSchema] = {}
         self.validators: Dict[str, BaseModel] = {}
         self._load_functions_definition()
-        # Add fn_unknown schema here so it's registered, validated, and used in decoding
+        unknown_description = (
+            "Call this function strictly when the user's request cannot be "
+            "fulfilled by any other available function in the catalog."
+        )
         self.func_def_dict["fn_unknown"] = FunctionSchema(
             name="fn_unknown",
-            description="Call this function strictly when the user's request cannot be fulfilled by any other available function in the catalog.",
+            description=unknown_description,
             parameters={"reason": ParameterInfo(type="string")},
             returns={"type": "string"}
         )
@@ -73,11 +87,11 @@ class DynamicFunctionDefinitions:
                 })
 
         except FileNotFoundError:
-            print(f"[ERROR] Function definitions file not found: {self._func_def_path}")
+            print(ERRORS["func_def_not_found"].format(path=self._func_def_path))
             sys.exit(1)
 
         except json.JSONDecodeError:
-            print(f"[ERROR] Failed to parse JSON in function definitions: {self._func_def_path}")
+            print(ERRORS["func_def_json_error"].format(path=self._func_def_path))
             sys.exit(1)
 
     def _preconfigure_validators(self) -> None:
@@ -128,11 +142,11 @@ class UserPrompts:
                 self._prompt_list.extend([p["prompt"] for p in raw])
 
         except FileNotFoundError:
-            print(f"[ERROR] User prompts file not found: {self.test_prompts_path}")
+            print(ERRORS["user_prompts_not_found"].format(path=self.test_prompts_path))
             sys.exit(1)
 
         except json.JSONDecodeError:
-            print(f"[ERROR] Failed to parse JSON in user prompts: {self.test_prompts_path}")
+            print(ERRORS["user_prompts_json_error"].format(path=self.test_prompts_path))
             sys.exit(1)
 
     def get(self) -> List[str]:
@@ -168,7 +182,7 @@ class JSONState(Enum):
     ERROR = "ERROR"
 
 
-class JSONStateTracker:
+class ConstrainedJSONTracker:
     """
     State-machine based JSON state tracker for constrained decoding.
     """
@@ -183,6 +197,7 @@ class JSONStateTracker:
         self.prefix_tokens: List[int] = []
         self.param_suffix: str = '","parameters":{'
         self.fn_suffix_tokens: Dict[str, List[int]] = {}
+        self.id_to_token: Dict[int, str] = {}
 
     def setup_prompt(self, user_prompt: str, model: Any) -> None:
         self.user_prompt = user_prompt
@@ -207,7 +222,8 @@ class JSONStateTracker:
         if self.user_prompt is None or self.model is None or self.prefix is None:
             return logits
 
-        allowed_ids = self._get_allowed_token_ids(generated_text, id_to_token)
+        self.id_to_token.update(id_to_token)
+        allowed_ids = self._get_allowed_token_ids(generated_text)
 
         if allowed_ids:
             new_logits = np.full_like(logits, -float("inf"))
@@ -227,68 +243,82 @@ class JSONStateTracker:
         except json.JSONDecodeError:
             return False
 
-    def _get_allowed_token_ids(
-            self,
-            generated_text: str,
-            id_to_token: Dict[int, str]) -> List[int]:
+    def _build_rem_prefix(self, generated_text: str) -> List[int]:
         """
         """
-        if len(generated_text) < len(self.prefix):
-            rem_prefix = self.prefix[len(generated_text):]
-            allowed_ids = []
-            for token_id, token_str in id_to_token.items():
-                if rem_prefix.startswith(token_str):
-                    allowed_ids.append(token_id)
-                elif token_str.startswith(rem_prefix):
-                    extra = token_str[len(rem_prefix):]
-                    for fn_name in self.func_def.func_def_dict:
-                        target = fn_name + self.param_suffix
-                        if target.startswith(extra) or extra.startswith(target):
-                            allowed_ids.append(token_id)
-                            break
+        allowed_ids: List[int] = []
+        rem_prefix = self.prefix[len(generated_text):]
+        for token_id, token_str in self.id_to_token.items():
+            if rem_prefix.startswith(token_str):
+                allowed_ids.append(token_id)
+            elif token_str.startswith(rem_prefix):
+                extra = token_str[len(rem_prefix):]
+                for fn_name in self.func_def.func_def_dict:
+                    target = fn_name + self.param_suffix
+                    if target.startswith(extra) or extra.startswith(target):
+                        allowed_ids.append(token_id)
+                        break
             return allowed_ids
 
-        rem = generated_text[len(self.prefix):]
-        is_in_name_phase = True
-        active_fn = None
-
+    def _define_name_phase(self, rem: str) -> Tuple[bool, Any]:
+        """
+        """
+        is_in_name_phase: bool = False
+        active_fn: Optional[str] = None
         for fn_name in self.func_def.func_def_dict:
             target = fn_name + self.param_suffix
             if rem == target:
-                is_in_name_phase = False
                 active_fn = fn_name
                 break
             elif target.startswith(rem):
                 is_in_name_phase = True
                 break
-            else:
-                is_in_name_phase = False
         
-        if is_in_name_phase:
-            allowed_ids = []
-            for token_id, token_str in id_to_token.items():
-                for fn_name in self.func_def.func_def_dict:
-                    target = fn_name + self.param_suffix
-                    if target.startswith(rem + token_str):
+        return (is_in_name_phase, active_fn)
+
+    def _resolve_name_phase(self, rem: str) -> List[int]:
+        """
+        """
+        allowed_ids: List[int] = []
+        for token_id, token_str in self.id_to_token.items():
+            for fn_name in self.func_def.func_def_dict:
+                target = fn_name + self.param_suffix
+                if target.startswith(rem + token_str):
+                    allowed_ids.append(token_id)
+                    break
+                elif (rem + token_str).startswith(target):
+                    extra = (rem + token_str)[len(target):]
+                    if extra == "" or extra == '"':
                         allowed_ids.append(token_id)
                         break
-                    elif (rem + token_str).startswith(target):
-                        extra = (rem + token_str)[len(target):]
-                        if extra == "" or extra == '"':
-                            allowed_ids.append(token_id)
-                            break
-                        elif extra.startswith('"'):
-                            key_part = extra[1:]
-                            for key in (
-                                self.func_def.func_def_dict[fn_name].parameters
-                            ):
-                                if (
-                                    (key + ":").startswith(key_part) or
-                                    key_part.startswith(key + ":")
-                                    ):
-                                    allowed_ids.append(token_id)
-                                    break
-            return allowed_ids
+                    elif extra.startswith('"'):
+                        key_part = extra[1:]
+                        for key in (
+                            self.func_def.func_def_dict[fn_name].parameters
+                        ):
+                            if (
+                                (key + ":").startswith(key_part) or
+                                key_part.startswith(key + ":")
+                                ):
+                                allowed_ids.append(token_id)
+                                break
+        return allowed_ids
+
+    def _get_allowed_token_ids(
+            self,
+            generated_text: str,
+            ) -> List[int]:
+        """
+        """
+        if len(generated_text) < len(self.prefix):
+            return self._build_rem_prefix(generated_text)
+        
+        allowed_ids: List[int] = []
+        rem = generated_text[len(self.prefix):]
+        is_in_name_phase, active_fn = self._define_name_phase(rem)
+
+        if is_in_name_phase:
+            return self._resolve_name_phase(rem)
         
         if active_fn is None:
             for fn_name in self.func_def.func_def_dict:
@@ -296,20 +326,21 @@ class JSONStateTracker:
                 if rem.startswith(target):
                     active_fn = fn_name
                     break
-        
-        if active_fn is None:
-            return []
+            return []       # aqui hay que definir un error
         
         func_schema = self.func_def.func_def_dict[active_fn]
         param_text = rem[len(active_fn) + len(self.param_suffix):]
         scan_res = self._scan_parameters(param_text, func_schema)
-        state = scan_res["state"]
-
-        allowed_ids = []
+        state = scan_res.get("state")
+        remaining_keys = scan_res.get("remaining_keys")
+        partial_key = scan_res.get("partial_key")
+        current_key = scan_res.get("current_key")
+        param_type = scan_res.get("type")
+        partial_value = scan_res.get("partial_value")
+        remaining_text = scan_res.get("remaining_text")
 
         if state == JSONState.KEY_START:
-            remaining_keys = scan_res["remaining_keys"]
-            for token_id, token_str in id_to_token.items():
+            for token_id, token_str in self.id_to_token.items():
                 for K in remaining_keys:
                     target = '"' + K + '":'
                     if target.startswith(token_str):
@@ -320,15 +351,12 @@ class JSONStateTracker:
                         if self._is_valid_value_prefix(
                             extra,
                             func_schema.parameters[K].type,
-                            remaining_keys,
-                            func_schema):
+                            remaining_keys):
                             allowed_ids.append(token_id)
                             break
             
         elif state == JSONState.KEY_PARTIAL:
-            remaining_keys = scan_res["remaining_keys"]
-            partial_key = scan_res["partial_key"]
-            for token_id, token_str in id_to_token.items():
+            for token_id, token_str in self.id_to_token.items():
                 for K in remaining_keys:
                     if K.startswith(partial_key):
                         target = (K + '":')[len(partial_key):]
@@ -339,15 +367,12 @@ class JSONStateTracker:
                             extra = token_str[len(target):]
                             if self._is_valid_value_prefix(
                                 extra, func_schema.parameters[K].type,
-                                remaining_keys,
-                                func_schema):
+                                remaining_keys):
                                 allowed_ids.append(token_id)
                                 break
         
         elif state == JSONState.COLON_START:
-            remaining_keys = scan_res["remaining_keys"]
-            current_key = scan_res["current_key"]
-            for token_id, token_str in id_to_token.items():
+            for token_id, token_str in self.id_to_token.items():
                 if ":".startswith(token_str):
                     allowed_ids.append(token_id)
                 elif token_str.startswith(":"):
@@ -355,74 +380,59 @@ class JSONStateTracker:
                     if self._is_valid_value_prefix(
                         extra,
                         func_schema.parameters[current_key].type,
-                        remaining_keys,
-                        func_schema):
+                        remaining_keys):
                         allowed_ids.append(token_id)
 
         elif state == JSONState.VALUE_START:
-            remaining_keys = scan_res["remaining_keys"]
-            current_key = scan_res["current_key"]
-            param_type = scan_res["type"]
-            for token_id, token_str in id_to_token.items():
+            for token_id, token_str in self.id_to_token.items():
                 if self._is_valid_value_prefix(
                     token_str,
                     param_type,
-                    remaining_keys,
-                    func_schema):
+                    remaining_keys):
                     allowed_ids.append(token_id)
 
         elif state == JSONState.VALUE_PARTIAL:
-            remaining_keys = scan_res["remaining_keys"]
-            current_key = scan_res["current_key"]
-            partial_value = scan_res["partial_value"]
-            param_type = scan_res["type"]
             if param_type == 'string':
-                for token_id, token_str in id_to_token.items():
+                for token_id, token_str in self.id_to_token.items():
                     idx = find_first_unescaped_quote(token_str)
                     if idx == -1:
                         allowed_ids.append(token_id)
                     else:
                         extra = token_str[idx+1:]
                         if self._is_valid_separator_prefix(
-                            extra, remaining_keys, func_schema):
+                            extra, remaining_keys):
                             allowed_ids.append(token_id)
                             
             elif param_type == 'number':
-                for token_id, token_str in id_to_token.items():
+                for token_id, token_str in self.id_to_token.items():
                     if number_regex.match(partial_value + token_str):
                         allowed_ids.append(token_id)
                     elif is_complete_number(partial_value):
                         if self._is_valid_separator_prefix(
-                            token_str, remaining_keys, func_schema):
+                            token_str, remaining_keys):
                             allowed_ids.append(token_id)
                             
             elif param_type in ('boolean', 'bool'):
                 target = 'true' if partial_value.startswith('t') else 'false'
-                for token_id, token_str in id_to_token.items():
+                for token_id, token_str in self.id_to_token.items():
                     if target.startswith(partial_value + token_str):
                         allowed_ids.append(token_id)
                     elif (target == partial_value + token_str or
                           (partial_value + token_str).startswith(target)):
                         extra = (partial_value + token_str)[len(target):]
                         if self._is_valid_separator_prefix(
-                            extra,
-                            remaining_keys,
-                            func_schema):
+                            extra, remaining_keys):
                             allowed_ids.append(token_id)
 
         elif state == JSONState.COMMA_OR_CLOSE_START:
-            remaining_keys = scan_res["remaining_keys"]
-            for token_id, token_str in id_to_token.items():
+            for token_id, token_str in self.id_to_token.items():
                 if self._is_valid_separator_prefix(
-                    token_str,
-                    remaining_keys,
-                    func_schema):
+                    token_str, remaining_keys):
                     allowed_ids.append(token_id)
 
         elif state == JSONState.CLOSED:
-            remaining_text = scan_res["remaining_text"]
             if remaining_text == "":
-                for token_id, token_str in id_to_token.items():
+                for token_id, token_str in self.id_to_token.items():
                     if '}'.startswith(token_str) or token_str.startswith('}'):
                         allowed_ids.append(token_id)
             elif remaining_text == "}":
@@ -568,8 +578,7 @@ class JSONStateTracker:
             self,
             extra: str,
             param_type: str,
-            remaining_keys: str,
-            func_schema: FunctionSchema) -> bool:
+            remaining_keys: str) -> bool:
         """
         """
         if param_type == "string":
@@ -582,7 +591,8 @@ class JSONStateTracker:
                     return True
                 else:
                     sep_part = val_part[idx+1:]
-                    return self._is_valid_separator_prefix(sep_part, remaining_keys, func_schema)
+                    return self._is_valid_separator_prefix(
+                        sep_part, remaining_keys)
             return False
         
         elif param_type == "number":
@@ -595,8 +605,7 @@ class JSONStateTracker:
                     sep_part = extra[i:]
                     if (is_complete_number(num_part) and
                         self._is_valid_separator_prefix(
-                            sep_part, remaining_keys, func_schema
-                            )):
+                            sep_part, remaining_keys)):
                         return True
             return False
         
@@ -607,7 +616,7 @@ class JSONStateTracker:
                 if extra.startswith(target):
                     sep_part = extra[len(target):]
                     if self._is_valid_separator_prefix(
-                        sep_part, remaining_keys, func_schema):
+                        sep_part, remaining_keys):
                         return True
 
             return False
@@ -616,8 +625,7 @@ class JSONStateTracker:
     def _is_valid_separator_prefix(
             self,
             extra: str,
-            remaining_keys: Set[str],
-            func_schema: FunctionSchema) -> bool:
+            remaining_keys: Set[str]) -> bool:
         """
         """
         if not remaining_keys:
@@ -664,7 +672,7 @@ class BasePrompt:
                 self.base_prompt_str = f.read()
 
         except FileNotFoundError:
-            print(f"[ERROR] Base prompt template file not found: {self.prompt_path}")
+            print(ERRORS["base_prompt_not_found"].format(path=self.prompt_path))
             sys.exit(1)
 
     def _inject_func_def(self) -> None:
@@ -742,10 +750,10 @@ class ModelEngine(Small_LLM_Model):
         """
         """
         if base_prompt_str:
-            base_prompt_tokes = (
+            base_prompt_tokens = (
                 self.encode(base_prompt_str).flatten().tolist()
             )
-            len_base_prompt = len(base_prompt_tokes)
+            len_base_prompt = len(base_prompt_tokens)
             
         prompt_tokens = self.encode(prompt).flatten().tolist()
         len_prompt = len(prompt_tokens)
@@ -819,7 +827,7 @@ def main() -> None:
     func_def = DynamicFunctionDefinitions(arg.functions_definition)
     user_prompts = UserPrompts(arg.input)
     model = ModelEngine()
-    json_traker = JSONStateTracker(func_def)
+    json_traker = ConstrainedJSONTracker(func_def)
 
     model_response_list: List[Dict[str, Any]] = []
 
@@ -839,17 +847,16 @@ def main() -> None:
             dict_response = json.loads(generated_text)
             fn_name = dict_response.get("name")
             if not fn_name or fn_name not in func_def.validators:
-                raise ValueError(f"Unknown or missing function name: {fn_name}")
+                raise ValueError(ERRORS["unknown_fn_error"].format(fn_name=fn_name))
             
-            # Validate parameters using the corresponding Pydantic validator
             func_def.validators[fn_name](**dict_response.get("parameters", {}))
             model_response_list.append(dict_response)
         
         except json.JSONDecodeError as e:
-            print(f"JSON Decoding ERROR: {e}")
+            print(ERRORS["json_decode_error"].format(error=e))
 
         except Exception as e:
-            print(f"Validation ERROR: {e}")
+            print(ERRORS["validation_error"].format(error=e))
         
     compose_output_file(model_response_list)
 
