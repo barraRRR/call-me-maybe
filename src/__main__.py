@@ -1,45 +1,20 @@
 from llm_sdk.llm_sdk import Small_LLM_Model
-from typing import Union, Optional, Dict, List, Tuple, Any, Protocol
+from typing import Union, Optional, Dict, List, Tuple, Any, Protocol, Set
 from pydantic import BaseModel, create_model
 from pydantic_core import PydanticCustomError
 from src.utils import TOKENIZER_PATH, BASE_PROMPT_PATH, FUNC_DEF_PATH
 from src.utils import OUTPUT_PATH, FUNC_CALL_TESTS_PATH, EOS_TOKEN_ID
 from src.utils import compose_output_file, debug_output_token_list
+from src.utils import is_quote_escaped, is_complete_number
+from src.utils import find_first_unescaped_quote, number_regex
 from src import __description__
+from enum import Enum
 import numpy as np
 import json
 import argparse
 import os
-import re
 import sys
-
-# Regex and helpers for parsing partial JSON values
-number_prefix_regex = re.compile(r'^[+-]?[0-9]*\.?[0-9]*([eE][+-]?[0-9]*)?$')
-
-def is_quote_escaped(s: str, i: int) -> bool:
-    count = 0
-    j = i - 1
-    while j >= 0 and s[j] == '\\':
-        count += 1
-        j -= 1
-    return count % 2 != 0
-
-def find_first_unescaped_quote(s: str) -> int:
-    for i, c in enumerate(s):
-        if c == '"' and not is_quote_escaped(s, i):
-            return i
-    return -1
-
-def is_complete_number(s: str) -> bool:
-    try:
-        float(s)
-        if s in ('', '+', '-', '.', '+.', '-.', 'e', 'E', '+e', '-e'):
-            return False
-        if not s[-1].isdigit() and s[-1] not in ('.', 'e', 'E'):
-            return False
-        return True
-    except ValueError:
-        return False
+import re
 
 
 class ParameterInfo(BaseModel):
@@ -178,6 +153,21 @@ class TokenizerMaskProtocol(Protocol):
         ...
 
 
+class JSONState(Enum):
+    KEY = "KEY"
+    KEY_START = "KEY_START"
+    KEY_PARTIAL = "KEY_PARTIAL"
+    COLON_START = "COLON_START"
+    COLON = "COLON"
+    VALUE_START = "VALUE_START"
+    VALUE = "VALUE"
+    VALUE_PARTIAL = "VALUE_PARTIAL"
+    COMMA_OR_CLOSE_START = "COMMA_OR_CLOSE_START"
+    COMMA_OR_CLOSE = "COMMA_OR_CLOSE"
+    CLOSED = "CLOSED"
+    ERROR = "ERROR"
+
+
 class JSONStateTracker:
     """
     State-machine based JSON state tracker for constrained decoding.
@@ -197,17 +187,13 @@ class JSONStateTracker:
     def setup_prompt(self, user_prompt: str, model: Any) -> None:
         self.user_prompt = user_prompt
         self.model = model
-        
-        # Precompute prefix and its tokens
         self.prefix = '{"prompt":' + json.dumps(user_prompt) + ',"name":"'
         self.prefix_tokens = model.encode(self.prefix).flatten().tolist()
-        
-        # Precompute candidate function name suffix tokens (name + param_suffix)
         self.fn_suffix_tokens = {}
+        
         for fn_name in self.func_def.func_def_dict:
             full_str = self.prefix + fn_name + self.param_suffix
             full_tokens = model.encode(full_str).flatten().tolist()
-            # Extract suffix tokens starting after prefix
             self.fn_suffix_tokens[fn_name] = full_tokens[len(self.prefix_tokens):]
 
     def mask(
@@ -218,18 +204,17 @@ class JSONStateTracker:
             ) -> List[float]:
         """
         """
-        if len(generated_text) == 0:
-            for token_id, token_str in id_to_token.items():
-                if token_str != "{":
-                    logits[token_id] = -float("inf")
+        if self.user_prompt is None or self.model is None or self.prefix is None:
+            return logits
 
-        elif generated_text.endswith("{"):
-            for token_id, token_str in id_to_token.items():
-                if token_str != '"':
-                    logits[token_id] = -float("inf")
-        
-        self._build_response_dict(generated_text)
+        allowed_ids = self._get_allowed_token_ids(generated_text, id_to_token)
 
+        if allowed_ids:
+            new_logits = np.full_like(logits, -float("inf"))
+            for token_id in allowed_ids:
+                new_logits[token_id] = logits[token_id]
+            return new_logits.tolist()
+            
         return logits
 
     @staticmethod
@@ -239,28 +224,421 @@ class JSONStateTracker:
         try:
             json.loads(current_text)
             return True
+        except json.JSONDecodeError:
+            return False
 
-        except json.JSONDecodeError: return False
-
-    def _build_response_dict(
+    def _get_allowed_token_ids(
             self,
-            generated_text: str
-            ) -> None:
+            generated_text: str,
+            id_to_token: Dict[int, str]) -> List[int]:
         """
         """
-        text_blocks = generated_text.split(",")
-        if len(text_blocks) == 3:
-            user_prompt = text_blocks[0].split(":")[1].strip('"') 
-            fn_name = text_blocks[1].split(":")[1].strip('"')
-            if fn_name == "fn_unknown":
-                raise PydanticCustomError(
-                    "fn_unknown",
-                    "TODO: write unknown fn error"
-                )
+        if len(generated_text) < len(self.prefix):
+            rem_prefix = self.prefix[len(generated_text):]
+            allowed_ids = []
+            for token_id, token_str in id_to_token.items():
+                if rem_prefix.startswith(token_str):
+                    allowed_ids.append(token_id)
+                elif token_str.startswith(rem_prefix):
+                    extra = token_str[len(rem_prefix):]
+                    for fn_name in self.func_def.func_def_dict:
+                        target = fn_name + self.param_suffix
+                        if target.startswith(extra) or extra.startswith(target):
+                            allowed_ids.append(token_id)
+                            break
+            return allowed_ids
+
+        rem = generated_text[len(self.prefix):]
+        is_in_name_phase = True
+        active_fn = None
+
+        for fn_name in self.func_def.func_def_dict:
+            target = fn_name + self.param_suffix
+            if rem == target:
+                is_in_name_phase = False
+                active_fn = fn_name
+                break
+            elif target.startswith(rem):
+                is_in_name_phase = True
+                break
+            else:
+                is_in_name_phase = False
         
-            if not self.response_dict.get(user_prompt):
-                self.response_dict[user_prompt] = fn_name
-                self.response_dict[user_prompt] = fn_name
+        if is_in_name_phase:
+            allowed_ids = []
+            for token_id, token_str in id_to_token.items():
+                for fn_name in self.func_def.func_def_dict:
+                    target = fn_name + self.param_suffix
+                    if target.startswith(rem + token_str):
+                        allowed_ids.append(token_id)
+                        break
+                    elif (rem + token_str).startswith(target):
+                        extra = (rem + token_str)[len(target):]
+                        if extra == "" or extra == '"':
+                            allowed_ids.append(token_id)
+                            break
+                        elif extra.startswith('"'):
+                            key_part = extra[1:]
+                            for key in (
+                                self.func_def.func_def_dict[fn_name].parameters
+                            ):
+                                if (
+                                    (key + ":").startswith(key_part) or
+                                    key_part.startswith(key + ":")
+                                    ):
+                                    allowed_ids.append(token_id)
+                                    break
+            return allowed_ids
+        
+        if active_fn is None:
+            for fn_name in self.func_def.func_def_dict:
+                target = fn_name + self.param_suffix
+                if rem.startswith(target):
+                    active_fn = fn_name
+                    break
+        
+        if active_fn is None:
+            return []
+        
+        func_schema = self.func_def.func_def_dict[active_fn]
+        param_text = rem[len(active_fn) + len(self.param_suffix):]
+        scan_res = self._scan_parameters(param_text, func_schema)
+        state = scan_res["state"]
+
+        allowed_ids = []
+
+        if state == JSONState.KEY_START:
+            remaining_keys = scan_res["remaining_keys"]
+            for token_id, token_str in id_to_token.items():
+                for K in remaining_keys:
+                    target = '"' + K + '":'
+                    if target.startswith(token_str):
+                        allowed_ids.append(token_id)
+                        break
+                    elif token_str.startswith(target):
+                        extra = token_str[len(target):]
+                        if self._is_valid_value_prefix(
+                            extra,
+                            func_schema.parameters[K].type,
+                            remaining_keys,
+                            func_schema):
+                            allowed_ids.append(token_id)
+                            break
+            
+        elif state == JSONState.KEY_PARTIAL:
+            remaining_keys = scan_res["remaining_keys"]
+            partial_key = scan_res["partial_key"]
+            for token_id, token_str in id_to_token.items():
+                for K in remaining_keys:
+                    if K.startswith(partial_key):
+                        target = (K + '":')[len(partial_key):]
+                        if target.startswith(token_str):
+                            allowed_ids.append(token_id)
+                            break
+                        elif token_str.startswith(target):
+                            extra = token_str[len(target):]
+                            if self._is_valid_value_prefix(
+                                extra, func_schema.parameters[K].type,
+                                remaining_keys,
+                                func_schema):
+                                allowed_ids.append(token_id)
+                                break
+        
+        elif state == JSONState.COLON_START:
+            remaining_keys = scan_res["remaining_keys"]
+            current_key = scan_res["current_key"]
+            for token_id, token_str in id_to_token.items():
+                if ":".startswith(token_str):
+                    allowed_ids.append(token_id)
+                elif token_str.startswith(":"):
+                    extra = token_str[1:]
+                    if self._is_valid_value_prefix(
+                        extra,
+                        func_schema.parameters[current_key].type,
+                        remaining_keys,
+                        func_schema):
+                        allowed_ids.append(token_id)
+
+        elif state == JSONState.VALUE_START:
+            remaining_keys = scan_res["remaining_keys"]
+            current_key = scan_res["current_key"]
+            param_type = scan_res["type"]
+            for token_id, token_str in id_to_token.items():
+                if self._is_valid_value_prefix(
+                    token_str,
+                    param_type,
+                    remaining_keys,
+                    func_schema):
+                    allowed_ids.append(token_id)
+
+        elif state == JSONState.VALUE_PARTIAL:
+            remaining_keys = scan_res["remaining_keys"]
+            current_key = scan_res["current_key"]
+            partial_value = scan_res["partial_value"]
+            param_type = scan_res["type"]
+            if param_type == 'string':
+                for token_id, token_str in id_to_token.items():
+                    idx = find_first_unescaped_quote(token_str)
+                    if idx == -1:
+                        allowed_ids.append(token_id)
+                    else:
+                        extra = token_str[idx+1:]
+                        if self._is_valid_separator_prefix(
+                            extra, remaining_keys, func_schema):
+                            allowed_ids.append(token_id)
+                            
+            elif param_type == 'number':
+                for token_id, token_str in id_to_token.items():
+                    if number_regex.match(partial_value + token_str):
+                        allowed_ids.append(token_id)
+                    elif is_complete_number(partial_value):
+                        if self._is_valid_separator_prefix(
+                            token_str, remaining_keys, func_schema):
+                            allowed_ids.append(token_id)
+                            
+            elif param_type in ('boolean', 'bool'):
+                target = 'true' if partial_value.startswith('t') else 'false'
+                for token_id, token_str in id_to_token.items():
+                    if target.startswith(partial_value + token_str):
+                        allowed_ids.append(token_id)
+                    elif (target == partial_value + token_str or
+                          (partial_value + token_str).startswith(target)):
+                        extra = (partial_value + token_str)[len(target):]
+                        if self._is_valid_separator_prefix(
+                            extra,
+                            remaining_keys,
+                            func_schema):
+                            allowed_ids.append(token_id)
+
+        elif state == JSONState.COMMA_OR_CLOSE_START:
+            remaining_keys = scan_res["remaining_keys"]
+            for token_id, token_str in id_to_token.items():
+                if self._is_valid_separator_prefix(
+                    token_str,
+                    remaining_keys,
+                    func_schema):
+                    allowed_ids.append(token_id)
+
+        elif state == JSONState.CLOSED:
+            remaining_text = scan_res["remaining_text"]
+            if remaining_text == "":
+                for token_id, token_str in id_to_token.items():
+                    if '}'.startswith(token_str) or token_str.startswith('}'):
+                        allowed_ids.append(token_id)
+            elif remaining_text == "}":
+                allowed_ids.append(EOS_TOKEN_ID)
+
+        return allowed_ids
+
+    def _scan_parameters(
+            self,
+            param_text: str,
+            func_schema: FunctionSchema) -> Dict[str, Any]:
+        """
+        """
+        remaining_keys: Set[str] = set(func_schema.parameters.keys())
+        idx: int = 0
+        n: int = len(param_text)
+        current_key: str = None
+        state: JSONState = JSONState.KEY
+        
+        while idx < n:
+            if state == JSONState.KEY:
+                if param_text[idx] == '"':
+                    close_idx = param_text.find('"', idx + 1)
+                    if close_idx == -1:
+                        partial_key = param_text[idx+1:]
+                        return {
+                            'state': JSONState.KEY_PARTIAL,
+                            'remaining_keys': remaining_keys,
+                            'partial_key': partial_key
+                        }
+                    else:
+                        key = param_text[idx+1:close_idx]
+                        if key in remaining_keys:
+                            current_key = key
+                            remaining_keys.remove(key)
+                        idx = close_idx + 1
+                        state = JSONState.COLON
+                else:
+                    idx += 1
+            elif state == JSONState.COLON:
+                if param_text[idx] == ':':
+                    state = JSONState.VALUE
+                    idx += 1
+                else:
+                    idx += 1
+            elif state == JSONState.VALUE:
+                param_type = func_schema.parameters[current_key].type
+                if param_type == 'string':
+                    if param_text[idx] == '"':
+                        close_idx = -1
+                        i = idx + 1
+                        while i < n:
+                            if param_text[i] == '"':
+                                if not is_quote_escaped(param_text, i):
+                                    close_idx = i
+                                    break
+                            i += 1
+                        if close_idx == -1:
+                            partial_value = param_text[idx+1:]
+                            return {
+                                'state': JSONState.VALUE_PARTIAL,
+                                'remaining_keys': remaining_keys,
+                                'current_key': current_key,
+                                'partial_value': partial_value,
+                                'type': 'string'
+                            }
+                        else:
+                            idx = close_idx + 1
+                            state = JSONState.COMMA_OR_CLOSE
+                    else:
+                        idx += 1
+                elif param_type == 'number':
+                    start_idx = idx
+                    while idx < n and param_text[idx] in '-+.eE0123456789':
+                        idx += 1
+                    num_str = param_text[start_idx:idx]
+                    if idx < n:
+                        state = JSONState.COMMA_OR_CLOSE
+                    else:
+                        return {
+                            'state': JSONState.VALUE_PARTIAL,
+                            'remaining_keys': remaining_keys,
+                            'current_key': current_key,
+                            'partial_value': num_str,
+                            'type': 'number'
+                        }
+                elif param_type in ('boolean', 'bool'):
+                    if param_text[idx:].startswith('true'):
+                        idx += 4
+                        state = JSONState.COMMA_OR_CLOSE
+                    elif param_text[idx:].startswith('false'):
+                        idx += 5
+                        state = JSONState.COMMA_OR_CLOSE
+                    else:
+                        partial = param_text[idx:]
+                        return {
+                            'state': JSONState.VALUE_PARTIAL,
+                            'remaining_keys': remaining_keys,
+                            'current_key': current_key,
+                            'partial_value': partial,
+                            'type': 'boolean'
+                        }
+            elif state == JSONState.COMMA_OR_CLOSE:
+                if param_text[idx] == ',':
+                    state = JSONState.KEY
+                    idx += 1
+                elif param_text[idx] == '}':
+                    idx += 1
+                    return {
+                        'state': JSONState.CLOSED,
+                        'remaining_text': param_text[idx:]
+                    }
+                else:
+                    idx += 1
+                    
+        if state == JSONState.KEY:
+            return {
+                'state': JSONState.KEY_START,
+                'remaining_keys': remaining_keys
+            }
+        elif state == JSONState.COLON:
+            return {
+                'state': JSONState.COLON_START,
+                'remaining_keys': remaining_keys,
+                'current_key': current_key
+            }
+        elif state == JSONState.VALUE:
+            param_type = func_schema.parameters[current_key].type
+            return {
+                'state': JSONState.VALUE_START,
+                'remaining_keys': remaining_keys,
+                'current_key': current_key,
+                'type': param_type
+            }
+        elif state == JSONState.COMMA_OR_CLOSE:
+            return {
+                'state': JSONState.COMMA_OR_CLOSE_START,
+                'remaining_keys': remaining_keys
+            }
+        return {'state': JSONState.ERROR}
+
+    def _is_valid_value_prefix(
+            self,
+            extra: str,
+            param_type: str,
+            remaining_keys: str,
+            func_schema: FunctionSchema) -> bool:
+        """
+        """
+        if param_type == "string":
+            if '"'.startswith(extra):
+                return True
+            if extra.startswith('"'):
+                val_part = extra[1:]
+                idx = find_first_unescaped_quote(val_part)
+                if idx == -1:
+                    return True
+                else:
+                    sep_part = val_part[idx+1:]
+                    return self._is_valid_separator_prefix(sep_part, remaining_keys, func_schema)
+            return False
+        
+        elif param_type == "number":
+            if number_regex.match(extra):
+                return True
+            
+            for i in range(len(extra)):
+                if extra[i] in ',}':
+                    num_part = extra[:i]
+                    sep_part = extra[i:]
+                    if (is_complete_number(num_part) and
+                        self._is_valid_separator_prefix(
+                            sep_part, remaining_keys, func_schema
+                            )):
+                        return True
+            return False
+        
+        elif param_type in ("boolean", "bool"):
+            for target in ("true", "false"):
+                if target.startswith(extra):
+                    return True
+                if extra.startswith(target):
+                    sep_part = extra[len(target):]
+                    if self._is_valid_separator_prefix(
+                        sep_part, remaining_keys, func_schema):
+                        return True
+
+            return False
+        return False
+
+    def _is_valid_separator_prefix(
+            self,
+            extra: str,
+            remaining_keys: Set[str],
+            func_schema: FunctionSchema) -> bool:
+        """
+        """
+        if not remaining_keys:
+            return "}}".startswith(extra) or extra.startswith("}}")
+
+        if ",".startswith(extra):
+            return True
+
+        elif extra.startswith(","):
+            next_extra = extra[1:]
+            if '"'.startswith(next_extra):
+                return True
+
+            if next_extra.startswith('"'):
+                key_part = next_extra[1:]
+                for K in remaining_keys:
+                    if ((K + '":').startswith(key_part) or
+                        key_part.startswith(K + '":')):
+                        return True
+
+        return False
 
 
 class BasePrompt:
@@ -292,8 +670,9 @@ class BasePrompt:
     def _inject_func_def(self) -> None:
         """
         """
+        funcs_to_inject = [f.model_dump() for name, f in self.func_def_dict.items() if name != "fn_unknown"]
         func_def_text: str = json.dumps(
-            [f.model_dump() for f in self.func_def_dict.values()],
+            funcs_to_inject,
             separators=(',', ':'),
             ensure_ascii=False
         )
@@ -347,6 +726,9 @@ class ModelEngine(Small_LLM_Model):
         self.id_to_token: Dict[int, str] = {
             v: k for k, v in self.vocab_dict.items()
             }
+        self.id_to_token_decoded: Dict[int, str] = {
+            v: k.replace('Ġ', ' ').replace('Ċ', '\n') for k, v in self.vocab_dict.items()
+            }
 
     def generate(
             self,
@@ -380,7 +762,7 @@ class ModelEngine(Small_LLM_Model):
                     logits = tracker.mask(
                         generated_text=generated_text,
                         logits=logits,
-                        id_to_token=self.id_to_token)
+                        id_to_token=self.id_to_token_decoded)
 
                 next_token = int(np.argmax(logits))
                 if next_token == EOS_TOKEN_ID: break
@@ -396,7 +778,7 @@ class ModelEngine(Small_LLM_Model):
                 else: continue
 
             except Exception as e:
-                print(f"ERROR: {e}")    # terminar de definir error handling
+                print(f"ERROR: {e}")
                 break
 
         return self.decode(tokens_list[len_prompt:])
@@ -414,6 +796,8 @@ class ModelEngine(Small_LLM_Model):
         print("\n" + f" GENERATION_TEST_{test_num:02d} ".center(60, "="))
         print("PROMPT: ", test)
         composed_prompt: str = prompt.compose_base_prompt(test)
+        if tracker and hasattr(tracker, "setup_prompt"):
+            tracker.setup_prompt(test, self)
         generated_text = self.generate(
             tracker=tracker,
             prompt=composed_prompt,
