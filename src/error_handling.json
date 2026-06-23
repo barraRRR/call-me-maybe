@@ -1,6 +1,7 @@
 {
   "func_def_not_found": "[ERROR] Function definitions file not found: {path}",
   "func_def_json_error": "[ERROR] Failed to parse JSON in function definitions: {path}",
+  "func_def_validation_error": "[ERROR] Validation error in function definitions: {path}\n{error}",
   "user_prompts_not_found": "[ERROR] User prompts file not found: {path}",
   "user_prompts_json_error": "[ERROR] Failed to parse JSON in user prompts: {path}",
   "base_prompt_not_found": "[ERROR] Base prompt template file not found: {path}",

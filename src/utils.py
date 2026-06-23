@@ -127,14 +127,18 @@ def goodbye() -> str:
 def print_error(
         error_msg: str = "An unexpected error ocurred...",
         critical: bool = False, 
-        error_title: str = "ERROR",
-        error_subtitle: str = "Unexpected error") -> None:
+        error_title: str = "ERROR") -> None:
     """
     """
     error_title = error_title if not critical else "CRITICAL ERROR"
+    error_subtitle = "A critical error ocurred" if critical else "An unexpected error ocurred" 
     comp_msg = (
         "\n"
         f"  [{error_title}]: {error_subtitle}\n"
         f"      └ {error_msg}\n"
     )
     print(comp_msg)
+    
+    if critical:
+        wait_for_enter()
+        goodbye()
