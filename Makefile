@@ -20,7 +20,7 @@ run-edge:
 		uv run python -m src --input data/edge/edge_cases.json
 
 debug:
-		venv/bin/python3 -m pdb fly_in.py
+		.venv/bin/python3 -m pdb fly_in.py
 
 clean:
 		rm -rf __pycache__
@@ -29,10 +29,10 @@ clean:
 		rm output_file.txt
 
 lint:
-		venv/bin/flake8 . --exclude=venv && venv/bin/mypy . --exclude venv --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
+		.venv/bin/flake8 . --exclude=.venv,moulinette,llm_sdk && .venv/bin/mypy . --exclude .venv,moulinette,llm_sdk --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
 
 lint-strict:
-		venv/bin/flake8 . --exclude=venv && venv/bin/mypy . --exclude venv --strict
+		.venv/bin/flake8 . --exclude=.venv,moulinette,llm_sdk && .venv/bin/mypy . --exclude .venv,moulinette,llm_sdk --strict
 
 
 
