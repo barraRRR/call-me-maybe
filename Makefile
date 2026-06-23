@@ -19,8 +19,20 @@ run:
 run-edge:
 		uv run python -m src --input data/edge/edge_cases.json
 
+debug:
+		venv/bin/python3 -m pdb fly_in.py
+
 clean:
-		rm -rf data/output
+		rm -rf __pycache__
+		rm -rf .pytest_cache
+		rm -rf .mypy_cache
+		rm output_file.txt
+
+lint:
+		venv/bin/flake8 . --exclude=venv && venv/bin/mypy . --exclude venv --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
+
+lint-strict:
+		venv/bin/flake8 . --exclude=venv && venv/bin/mypy . --exclude venv --strict
 
 
 

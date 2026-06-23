@@ -12,6 +12,7 @@ FUNC_CALL_TESTS_PATH = "data/input/function_calling_tests.json"
 OUTPUT_PATH = "data/output/function_calls.json"
 ERROR_MSG_PATH = "src/error_handling.json"
 EOS_TOKEN_ID = 151645
+UX_WIDTH = 100
 
 
 number_regex = re.compile(
@@ -25,6 +26,15 @@ def clear() -> None:
 
 
 def is_quote_escaped(s: str, i: int) -> bool:
+    """Checks if the double quote character at index i is escaped.
+
+    Args:
+        s (str): The string to check.
+        i (int): The index of the quote character.
+
+    Returns:
+        bool: True if the quote is escaped by an odd number of backslashes, False otherwise.
+    """
     count = 0
     j = i - 1
     while j >= 0 and s[j] == '\\':
@@ -34,6 +44,14 @@ def is_quote_escaped(s: str, i: int) -> bool:
 
 
 def find_first_unescaped_quote(s: str) -> int:
+    """Finds the index of the first unescaped double quote in a string.
+
+    Args:
+        s (str): The string to search.
+
+    Returns:
+        int: The 0-based index of the first unescaped quote, or -1 if not found.
+    """
     for i, c in enumerate(s):
         if c == '"' and not is_quote_escaped(s, i):
             return i
@@ -41,6 +59,14 @@ def find_first_unescaped_quote(s: str) -> int:
 
 
 def is_complete_number(s: str) -> bool:
+    """Validates if a string represents a fully formed numeric value.
+
+    Args:
+        s (str): The string to evaluate.
+
+    Returns:
+        bool: True if the string is a complete numeric representation, False otherwise.
+    """
     try:
         float(s)
         if s in ('', '+', '-', '.', '+.', '-.', 'e', 'E', '+e', '-e'):
@@ -55,7 +81,11 @@ def is_complete_number(s: str) -> bool:
 def compose_output_file(
         model_response_list: List[Dict[str, Any]],
         output_path: str = OUTPUT_PATH) -> None:
-    """
+    """Writes the model responses to a structured JSON output file.
+
+    Args:
+        model_response_list (List[Dict[str, Any]]): The list of model predictions to save.
+        output_path (str): The destination file path. Defaults to OUTPUT_PATH.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -68,7 +98,10 @@ def compose_output_file(
 
 
 def debug_output_token_list(debug_token_list: List[str]) -> None:
-    """
+    """Saves the tracked generation tokens to a debug file for logging.
+
+    Args:
+        debug_token_list (List[str]): The list of generated token string representations.
     """
     debug_toke_list_path: str = "data/debug/debug_token_list.json"
     os.makedirs(os.path.dirname(debug_toke_list_path), exist_ok=True)
@@ -95,15 +128,16 @@ def title(center: int = 100) -> str:
     return ascii_art.center(center)
 
 
-def wait_for_enter(message: Optional[str]) -> None:
+def wait_for_enter(
+        message: str = "Press [ENTER] to continue...") -> None:
     """Halts execution until the user presses the 'Enter' key.
 
     Args:
         message (str, optional): Custom override string to display.
     """
-    if message is None:
-        message = "Press [ENTER] to continue..."
     input(message)
+    print("\033[F\033[2K", end="")
+    print("\r", end="")
 
 
 def welcome() -> None:
@@ -111,7 +145,8 @@ def welcome() -> None:
     clear()
     print()
     print(title(), end="\n" * 3)
-    wait_for_enter(None)
+    wait_for_enter()
+    clear()
 
 
 def goodbye() -> str:
@@ -128,7 +163,15 @@ def print_error(
         error_msg: str = "An unexpected error ocurred...",
         critical: bool = False, 
         error_title: str = "ERROR") -> None:
-    """
+    """Formats and prints an error message to the console.
+
+    If critical is True, this function halts execution until the user presses Enter
+    and then terminates the program.
+
+    Args:
+        error_msg (str): The details of the error message.
+        critical (bool): If True, halts execution and exits the program. Defaults to False.
+        error_title (str): The visual title of the error banner. Defaults to "ERROR".
     """
     error_title = error_title if not critical else "CRITICAL ERROR"
     error_subtitle = "A critical error ocurred" if critical else "An unexpected error ocurred" 
@@ -142,3 +185,14 @@ def print_error(
     if critical:
         wait_for_enter()
         goodbye()
+
+
+def section_header(header: str, width: int = UX_WIDTH) -> None:
+    """
+    """
+    header_str: str = (
+        "+" + "-" * (width - 2) + "+\n" +
+        "|" + f"{header.center(width - 2)}" + "|\n" +
+        "+" + "-" * (width - 2) + "+\n"
+    )
+    print(header_str)

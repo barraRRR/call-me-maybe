@@ -1,15 +1,18 @@
 from llm_sdk.llm_sdk import Small_LLM_Model
 from typing import Union, Optional, Dict, List, Tuple, Any, Protocol, Set
-from pydantic import BaseModel, create_model, ValidationError, Field, PrivateAttr, ConfigDict
+from pydantic import BaseModel, create_model, ValidationError
+from pydantic import Field, PrivateAttr, ConfigDict
 from pydantic_core import PydanticCustomError
 from src.utils import TOKENIZER_PATH, BASE_PROMPT_PATH, FUNC_DEF_PATH
 from src.utils import OUTPUT_PATH, FUNC_CALL_TESTS_PATH, EOS_TOKEN_ID
-from src.utils import compose_output_file, debug_output_token_list
+from src.utils import compose_output_file, debug_output_token_list, UX_WIDTH
 from src.utils import is_quote_escaped, is_complete_number, ERROR_MSG_PATH
 from src.utils import find_first_unescaped_quote, number_regex, title
 from src.utils import clear, welcome, goodbye, print_error, wait_for_enter
+from src.utils import section_header
 from src import __description__
 from enum import Enum
+from time import sleep
 import numpy as np
 import json
 import argparse
@@ -23,20 +26,30 @@ def load_error_messages(path: str = ERROR_MSG_PATH) -> Dict[str, str]:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        print_error(error_msg="error_handling.json missing or invalid.", critical=True)
+        print_error(
+            error_msg="error_handling.json missing or invalid.", critical=True
+            )
         return {}
 
 ERRORS = load_error_messages()
 
 
 class ParameterInfo(BaseModel):
-    """
+    """Schema description for a single parameter.
+
+    Attributes:
+        type (str): The expected data type of the parameter.
     """
     type: str
 
 
 class FunctionCallResult(BaseModel):
-    """
+    """Data model representing a structured function call prediction.
+
+    Attributes:
+        prompt (str): The original natural-language prompt.
+        name (str): The name of the function to invoke.
+        parameters (BaseModel): The validated parameter model.
     """
     prompt: str
     name: str
@@ -44,7 +57,13 @@ class FunctionCallResult(BaseModel):
 
 
 class FunctionSchema(BaseModel):
-    """
+    """Schema descriptor containing complete metadata for an executable function.
+
+    Attributes:
+        name (str): The unique name of the function.
+        description (str): Explanatory description of the function's behavior.
+        parameters (Dict[str, ParameterInfo]): Dictionary of parameter descriptors.
+        returns (Dict[str, str]): Return type descriptor.
     """
     name: str
     description: str
@@ -53,28 +72,29 @@ class FunctionSchema(BaseModel):
 
 
 class DynamicFunctionDefinitions(BaseModel):
-    """
+    """Handles parsing of functions definitions JSON and compiles validators dynamically.
+
+    Attributes:
+        func_def_path (str): File path to the function definitions JSON.
+        func_def_dict (Dict[str, FunctionSchema]): Map of loaded function schemas.
+        validators (Dict[str, Any]): Dynamic Pydantic validator models compiled at runtime.
     """
     func_def_path: str
     func_def_dict: Dict[str, FunctionSchema] = Field(default_factory=dict)
     validators: Dict[str, Any] = Field(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
+        """Initializes function schemas and generates validators post instantiation."""
         self._load_functions_definition()
-        unknown_description = (
-            "Call this function strictly when the user's request cannot be "
-            "fulfilled by any other available function in the catalog."
-        )
-        self.func_def_dict["fn_unknown"] = FunctionSchema(
-            name="fn_unknown",
-            description=unknown_description,
-            parameters={"reason": ParameterInfo(type="string")},
-            returns={"type": "string"}
-        )
         self._preconfigure_validators()
 
     def _load_functions_definition(self) -> None:
-        """
+        """Loads and parses function definitions from the JSON file path.
+
+        Raises:
+            FileNotFoundError: If the function definitions file does not exist.
+            JSONDecodeError: If the file is not valid JSON.
+            ValidationError: If the loaded schema fails validation rules.
         """
         try:
             with open(self.func_def_path, "r") as file:
@@ -105,8 +125,7 @@ class DynamicFunctionDefinitions(BaseModel):
             print_error(error_msg=error_msg, critical=True)
 
     def _preconfigure_validators(self) -> None:
-        """
-        """
+        """Compiles dynamic Pydantic validation models for all loaded functions."""
         type_map: Dict[str, Any] = {
                 "number": float,
                 "int": int,
@@ -133,16 +152,24 @@ class DynamicFunctionDefinitions(BaseModel):
 
 
 class UserPrompts(BaseModel):
-    """
+    """Loads and holds the natural language prompts to test the model against.
+
+    Attributes:
+        test_prompts_path (str): File path to the test prompts JSON file.
     """
     test_prompts_path: str
     _prompt_list: List[str] = PrivateAttr(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
+        """Loads the test prompts post instantiation."""
         self._load_user_prompts()
 
     def _load_user_prompts(self) -> None:
-        """
+        """Parses the test prompts JSON file and stores the prompts list.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            JSONDecodeError: If the file format is invalid.
         """
         try:
             with open(self.test_prompts_path, "r") as file:
@@ -166,24 +193,111 @@ class UserPrompts(BaseModel):
             print_error(error_msg=error_msg, critical=True)
 
     def get(self) -> List[str]:
-        """
+        """Gets the list of loaded test prompts.
+
+        Returns:
+            List[str]: The list of test prompts.
         """
         return self._prompt_list
 
 
+class BasePrompt(BaseModel):
+    """Manages the formulation and injection of context into the base LLM prompt template.
+
+    Attributes:
+        func_def_dict (Dict[str, FunctionSchema]): Available function definitions dictionary.
+        prompt_path (str): File path to the base prompt template. Defaults to BASE_PROMPT_PATH.
+        base_prompt_str (str): The raw base prompt string loaded from file.
+        composed_base_prompt (str): The prompt string with dynamic function schemas injected.
+    """
+    func_def_dict: Dict[str, FunctionSchema]
+    prompt_path: str = BASE_PROMPT_PATH
+    base_prompt_str: str = ""
+    composed_base_prompt: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        """Loads and formats the prompt templates post instantiation."""
+        self._load_base_prompt()
+        self._inject_func_def()
+
+    def _load_base_prompt(self) -> None:
+        """Loads the raw base prompt template from file.
+
+        Raises:
+            FileNotFoundError: If the template file is missing.
+        """
+        try:
+            with open(self.prompt_path, "r", encoding="utf-8") as f:
+                self.base_prompt_str = f.read()
+
+        except FileNotFoundError:
+            error_msg = ERRORS["base_prompt_not_found"].format(path=self.prompt_path)
+            print_error(error_msg=error_msg, critical=True)
+
+    def _inject_func_def(self) -> None:
+        """Injects serialized JSON representations of available function definitions."""
+        funcs_to_inject = [f.model_dump() for name, f in self.func_def_dict.items()]
+        func_def_text: str = json.dumps(
+            funcs_to_inject,
+            separators=(',', ':'),
+            ensure_ascii=False
+        )
+        self.base_prompt_str = self.base_prompt_str.format(
+            functions_context=func_def_text
+        )
+    
+    def compose_base_prompt(self, user_promp_str: str) -> str:
+        """Composes the final structured prompt containing system context and user query.
+
+        Args:
+            user_promp_str (str): The user query prompt.
+
+        Returns:
+            str: The fully composed model query prompt.
+        """
+        self.composed_base_prompt = (
+            self.base_prompt_str + '"' + user_promp_str + '"\n' + "JSON Output:"
+        )
+        return self.composed_base_prompt
+
+    def get(self) -> str:
+        """Gets the composed base prompt.
+
+        Returns:
+            str: The composed base prompt string.
+        """
+        return self.composed_base_prompt
+
+
 class TokenizerMaskProtocol(Protocol):
+    """Protocol defining the interface for generation trackers."""
+
     def mask(
         self,
         generated_text: str,
         logits: List[float],
         id_to_token: Dict[int, str]
         ) -> List[float]:
-        """
+        """Masks output logits based on constraints and current generation context.
+
+        Args:
+            generated_text (str): The currently decoded generated text slice.
+            logits (List[float]): Logits list from the model.
+            id_to_token (Dict[int, str]): Token vocabulary dictionary.
+
+        Returns:
+            List[float]: The modified logits list with invalid tokens masked to -inf.
         """
         ...
 
     def end_condition(self, current_text: str) -> bool:
-        """
+        """Checks if the end conditions are met to terminate generation.
+
+        Args:
+            current_text (str): The currently generated string.
+
+        Returns:
+            bool: True if generation should terminate, False otherwise.
         """
         ...
 
@@ -204,8 +318,18 @@ class JSONState(Enum):
 
 
 class ConstrainedJSONTracker(BaseModel):
-    """
-    State-machine based JSON state tracker for constrained decoding.
+    """State-machine based JSON state tracker for constrained decoding.
+
+    Attributes:
+        func_def (DynamicFunctionDefinitions): Dynamic functions schema catalog.
+        user_prompt (str): The natural language query. Defaults to empty.
+        model (Any): The model engine. Defaults to None.
+        prefix (str): Start template boundary representation.
+        prefix_tokens (List[int]): Pre-tokenized prompt suffix prefix list.
+        decoded_prefix (str): Decoded representation of prefix sequence.
+        param_suffix (str): Serialized prefix indicating start of parameter keys.
+        fn_suffix_tokens (Dict[str, List[int]]): Pre-tokenized function suffix map.
+        id_to_token (Dict[int, str]): Reverse mapped token dictionary.
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -220,6 +344,12 @@ class ConstrainedJSONTracker(BaseModel):
     id_to_token: Dict[int, str] = Field(default_factory=dict)
 
     def setup_prompt(self, user_prompt: str, model: Any) -> None:
+        """Sets up and encodes the prompt template boundaries for tracking.
+
+        Args:
+            user_prompt (str): The user's query prompt.
+            model (Any): The model engine instance.
+        """
         self.user_prompt = user_prompt
         self.model = model
         self.prefix = '{"prompt":' + json.dumps(user_prompt) + ',"name":"'
@@ -238,7 +368,15 @@ class ConstrainedJSONTracker(BaseModel):
             logits: List[float],
             id_to_token: Dict[int, str]
             ) -> List[float]:
-        """
+        """Applies logits constraint mask using current tracking state.
+
+        Args:
+            generated_text (str): The currently generated string slice.
+            logits (List[float]): The raw logits array.
+            id_to_token (Dict[int, str]): Token ID to vocabulary dictionary.
+
+        Returns:
+            List[float]: The constrained logits array.
         """
         if not self.user_prompt or self.model is None or not self.prefix:
             return logits
@@ -256,7 +394,13 @@ class ConstrainedJSONTracker(BaseModel):
 
     @staticmethod
     def end_condition(current_text: str) -> bool:
-        """
+        """Evaluates if the generated text forms a complete parseable JSON payload.
+
+        Args:
+            current_text (str): The generated JSON text.
+
+        Returns:
+            bool: True if the text parses successfully as JSON, False otherwise.
         """
         try:
             json.loads(current_text)
@@ -265,7 +409,13 @@ class ConstrainedJSONTracker(BaseModel):
             return False
 
     def _build_rem_prefix(self, generated_text: str) -> List[int]:
-        """
+        """Identifies allowed tokens that can complete the remaining prefix.
+
+        Args:
+            generated_text (str): The generated text string.
+
+        Returns:
+            List[int]: The list of allowed token IDs.
         """
         allowed_ids: List[int] = []
         rem_prefix = self.decoded_prefix[len(generated_text):]
@@ -282,7 +432,13 @@ class ConstrainedJSONTracker(BaseModel):
         return allowed_ids
 
     def _define_name_phase(self, rem: str) -> Tuple[bool, Any]:
-        """
+        """Checks if the decoder is currently completing a function name.
+
+        Args:
+            rem (str): The remaining generated text slice.
+
+        Returns:
+            Tuple[bool, Any]: (True if in name phase, the active function name string if fully matched).
         """
         is_in_name_phase: bool = False
         active_fn: Optional[str] = None
@@ -298,7 +454,13 @@ class ConstrainedJSONTracker(BaseModel):
         return (is_in_name_phase, active_fn)
 
     def _resolve_name_phase(self, rem: str) -> List[int]:
-        """
+        """Retrieves allowed tokens to continue completing the function name prefix.
+
+        Args:
+            rem (str): The remaining generated text slice.
+
+        Returns:
+            List[int]: The list of allowed token IDs.
         """
         allowed_ids: List[int] = []
         for token_id, token_str in self.id_to_token.items():
@@ -329,7 +491,13 @@ class ConstrainedJSONTracker(BaseModel):
             self,
             generated_text: str,
             ) -> List[int]:
-        """
+        """Determines the list of allowed token IDs based on current generated text state.
+
+        Args:
+            generated_text (str): The complete text generated so far.
+
+        Returns:
+            List[int]: List of allowed token IDs for the next step.
         """
         if len(generated_text) < len(self.decoded_prefix):
             return self._build_rem_prefix(generated_text)
@@ -347,7 +515,7 @@ class ConstrainedJSONTracker(BaseModel):
                 if rem.startswith(target):
                     active_fn = fn_name
                     break
-            return []       # aqui hay que definir un error
+            return []
         
         func_schema = self.func_def.func_def_dict[active_fn]
         param_text = rem[len(active_fn) + len(self.param_suffix):]
@@ -471,7 +639,14 @@ class ConstrainedJSONTracker(BaseModel):
             self,
             param_text: str,
             func_schema: FunctionSchema) -> Dict[str, Any]:
-        """
+        """Scans the generated parameters string to parse the state of the JSON.
+
+        Args:
+            param_text (str): The parameters dictionary substring generated so far.
+            func_schema (FunctionSchema): The schema of the currently selected function.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing parsing state metrics (state, remaining keys, partial/current keys, value type, etc.).
         """
         remaining_keys: Set[str] = set(func_schema.parameters.keys())
         idx: int = 0
@@ -607,7 +782,16 @@ class ConstrainedJSONTracker(BaseModel):
             param_type: str,
             remaining_keys: str,
             current_key: Optional[str] = None) -> bool:
-        """
+        """Checks if a suffix string matches a valid prefix for parameter values.
+
+        Args:
+            extra (str): The suffix string to evaluate.
+            param_type (str): The expected parameter type (string, number, boolean).
+            remaining_keys (str): Set of remaining parameter keys.
+            current_key (Optional[str]): The parameter key currently being processed.
+
+        Returns:
+            bool: True if the suffix is a valid value prefix representation, False otherwise.
         """
         if param_type == "string":
             if '"'.startswith(extra):
@@ -656,7 +840,14 @@ class ConstrainedJSONTracker(BaseModel):
             self,
             extra: str,
             remaining_keys: Set[str]) -> bool:
-        """
+        """Checks if a suffix matches a valid separator or closing structure.
+
+        Args:
+            extra (str): The suffix string to evaluate.
+            remaining_keys (Set[str]): Set of remaining parameter keys.
+
+        Returns:
+            bool: True if the suffix matches a valid separator, False otherwise.
         """
         if not remaining_keys:
             return "}}".startswith(extra) or extra.startswith("}}")
@@ -679,58 +870,14 @@ class ConstrainedJSONTracker(BaseModel):
         return False
 
 
-class BasePrompt(BaseModel):
-    """
-    """
-    func_def_dict: Dict[str, FunctionSchema]
-    prompt_path: str = BASE_PROMPT_PATH
-    base_prompt_str: str = ""
-    composed_base_prompt: str = ""
-
-    def model_post_init(self, __context: Any) -> None:
-        self._load_base_prompt()
-        self._inject_func_def()
-
-    def _load_base_prompt(self) -> None:
-        """
-        """
-        try:
-            with open(self.prompt_path, "r", encoding="utf-8") as f:
-                self.base_prompt_str = f.read()
-
-        except FileNotFoundError:
-            error_msg = ERRORS["base_prompt_not_found"].format(path=self.prompt_path)
-            print_error(error_msg=error_msg, critical=True)
-
-    def _inject_func_def(self) -> None:
-        """
-        """
-        funcs_to_inject = [f.model_dump() for name, f in self.func_def_dict.items() if name != "fn_unknown"]
-        func_def_text: str = json.dumps(
-            funcs_to_inject,
-            separators=(',', ':'),
-            ensure_ascii=False
-        )
-        self.base_prompt_str = self.base_prompt_str.format(
-            functions_context=func_def_text
-        )
-    
-    def compose_base_prompt(self, user_promp_str: str) -> str:
-        """
-        """
-        self.composed_base_prompt = (
-            self.base_prompt_str + '"' + user_promp_str + '"\n' + "JSON Output:"
-        )
-        return self.composed_base_prompt
-
-    def get(self) -> str:
-        """
-        """
-        return self.composed_base_prompt
-
-
 class ModelEngine(BaseModel):
-    """
+    """Execution engine wrapping the LLM model and managing tokenizer configurations.
+
+    Attributes:
+        model_name (str): The identifier name of the model weights. Defaults to Qwen/Qwen3-0.6B.
+        vocab_dict (Dict[str, int]): Map of vocabulary tokens to IDs.
+        id_to_token (Dict[int, str]): Reverse lookup of vocabulary token IDs to strings.
+        id_to_token_decoded (Dict[int, str]): Token strings containing correct space/carriage mappings.
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -741,26 +888,21 @@ class ModelEngine(BaseModel):
     _model: Small_LLM_Model = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
+        """Loads model weights, tokenizer file, and maps the vocabulary structures."""
         self._model = Small_LLM_Model(model_name=self.model_name)
 
-        print("Initializing model...\nLooking for tokenizer file... ", end="")
         if os.path.exists(TOKENIZER_PATH):
-            print("FOUND!\nLoading data from tokenizer file...")
             with open(TOKENIZER_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
         
         else:
-            print("NOT FOUND\nAccesing to Hugging Face Server... ", end="")
             tokenizer = self._model.get_path_to_tokenizer_file()
-            print("OK")
             with open(tokenizer, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            print("Downloading tokenizer file...")
 
             os.makedirs(os.path.dirname(TOKENIZER_PATH), exist_ok=True)
             with open(TOKENIZER_PATH, "w") as f:
                 json.dump(data, f, indent=2)
-            print("Loading data from tokenizer file...")
         
         self.vocab_dict.update(data["model"]["vocab"])
         self.id_to_token.update({
@@ -771,12 +913,36 @@ class ModelEngine(BaseModel):
         })
 
     def encode(self, text: str) -> Any:
+        """Encodes input string to tensor token IDs.
+
+        Args:
+            text (str): The input text message.
+
+        Returns:
+            Any: Tokenized input IDs.
+        """
         return self._model.encode(text)
 
     def decode(self, ids: Any) -> str:
+        """Decodes token IDs back into string text.
+
+        Args:
+            ids (Any): The token IDs.
+
+        Returns:
+            str: The decoded string representation.
+        """
         return self._model.decode(ids)
 
     def get_logits_from_input_ids(self, input_ids: List[int]) -> List[float]:
+        """Retrieves logits distribution from model based on input sequence.
+
+        Args:
+            input_ids (List[int]): List of sequence token IDs.
+
+        Returns:
+            List[float]: The logits distribution.
+        """
         return self._model.get_logits_from_input_ids(input_ids)
 
     def generate(
@@ -788,7 +954,18 @@ class ModelEngine(BaseModel):
             answer_str: str = "ANSWER: ",
             printable: bool = False
             ) -> str:
-        """
+        """Executes guided autoregressive token generation using tracker constraints.
+
+        Args:
+            tracker (Optional[TokenizerMaskProtocol]): The logits constraint tracker.
+            prompt (str): The query prompt.
+            base_prompt_str (Optional[str]): System prompt base template.
+            max_new_tokens (int): The maximum tokens limit. Defaults to 50.
+            answer_str (str): Visual logging prefix. Defaults to "ANSWER: ".
+            printable (bool): If True, prints token generations in real time. Defaults to False.
+
+        Returns:
+            str: The generated text response.
         """
         if base_prompt_str:
             base_prompt_tokens = (
@@ -840,9 +1017,19 @@ class ModelEngine(BaseModel):
             test_num: int = 0,
             max_new_tokens: int = 50
             ) -> str:
+        """Runs generation test for a single query prompt.
+
+        Args:
+            tracker (Optional[TokenizerMaskProtocol]): The logits constraint tracker.
+            prompt (BasePrompt): The formatted system prompt manager.
+            test (str): The user query.
+            test_num (int): Visual indicator test identifier index. Defaults to 0.
+            max_new_tokens (int): The token limit. Defaults to 50.
+
+        Returns:
+            str: The generated response.
         """
-        """
-        print("\n" + f" GENERATION_TEST_{test_num:02d} ".center(60, "="))
+        print("\n" + f" GENERATION_TEST_{test_num:02d} ".center(UX_WIDTH, "="))
         print("PROMPT: ", test)
         composed_prompt: str = prompt.compose_base_prompt(test)
         if tracker and hasattr(tracker, "setup_prompt"):
@@ -857,8 +1044,7 @@ class ModelEngine(BaseModel):
 
 
 def main() -> None:
-    """
-    """
+    """CLI entrypoint loading resources, configuring targets, and executing predictions."""
     parser = argparse.ArgumentParser(description=__description__)
     parser.add_argument("--functions_definition", default=FUNC_DEF_PATH)
     parser.add_argument("--input", default=FUNC_CALL_TESTS_PATH)
@@ -866,9 +1052,19 @@ def main() -> None:
     arg = parser.parse_args()
 
     try:
+        welcome()
+        section_header("LOADING IO FILES")
         func_def = DynamicFunctionDefinitions(func_def_path=arg.functions_definition)
+        print(f"• Loading function schemas from {arg.functions_definition}...")
         user_prompts = UserPrompts(test_prompts_path=arg.input)
+        print(f"• Loading test prompts from {arg.input}...")
+        print(f"• Output file will be saved to {arg.output}...\n")
+        sleep(1)
+        section_header("LOADING MODEL")
         model = ModelEngine()
+        print()
+        sleep(1)
+        section_header("LAUNCHING TESTS")
         json_traker = ConstrainedJSONTracker(func_def=func_def)
 
         model_response_list: List[Dict[str, Any]] = []
@@ -897,19 +1093,9 @@ def main() -> None:
             
             except json.JSONDecodeError as e:
                 print_error(error_msg=ERRORS["json_decode_error"].format(error=e), critical=False)
-                model_response_list.append({
-                    "prompt": test,
-                    "name": "fn_unknown",
-                    "parameters": {"reason": f"JSON decoding error: {e}"}
-                })
 
             except Exception as e:
                 print_error(error_msg=ERRORS["validation_error"].format(error=e), critical=False)
-                model_response_list.append({
-                    "prompt": test,
-                    "name": "fn_unknown",
-                    "parameters": {"reason": f"Validation error: {e}"}
-                })
             
         compose_output_file(model_response_list)
 

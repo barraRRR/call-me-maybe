@@ -8,4 +8,5 @@ assets/
 .env
 moulinette
 eva_sheet.pdf
+.DS_Store
 
