@@ -1,12 +1,21 @@
+[tool.uv.workspace]                                                                                                                           
+members = [                                                                                                                                   
+    "llm_sdk"                                                         
+]    
+
 [project]
 name = "call_me_maybe"
 description= "A function calling tool that translates natural language prompts into structured function calls."
 version = "v1.0.0"
 requires-python = ">=3.10"
 dependencies = [
+    "llm-sdk",
     "flake8",
     "mypy",
     "wget",
     "pydantic",
     "numpy"
 ]
+
+[tool.uv.sources]                                                                                                                             
+llm-sdk = { workspace = true }

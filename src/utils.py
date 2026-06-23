@@ -119,13 +119,13 @@ def debug_output_token_list(debug_token_list: List[str]) -> None:
             )
 
 
-def title(center: int = 100) -> str:
+def title(center: int = UX_WIDTH) -> str:
     """Generates the ASCII title graphic for game screens.
 
     Returns:
         str: Centered multiline ASCII string.
     """
-    ascii_art = r"""           ____                              __
+    ascii_art = r"""            ____                              __
   _______ _/ / / __ _  ___   __ _  ___ ___ __/ /  ___
  / __/ _ `/ / / /  ' \/ -_) /  ' \/ _ `/ // / _ \/ -_)
  \__/\_,_/_/_/ /_/_/_/\__/ /_/_/_/\_,_/\_, /_.__/\__/
@@ -206,7 +206,7 @@ def section_header(header: str, width: int = UX_WIDTH) -> None:
             Defaults to UX_WIDTH.
     """
     header_str: str = (
-        "+" + "-" * (width - 2) + "+\n" +
+        "\n+" + "-" * (width - 2) + "+\n" +
         "|" + f"{header.center(width - 2)}" + "|\n" +
         "+" + "-" * (width - 2) + "+\n"
     )
