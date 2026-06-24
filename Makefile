@@ -5,10 +5,7 @@ install:
 	uv sync
 
 run:
-	HF_TOKEN="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" uv run python -m src
-
-run-edge:
-	uv run python -m src --input data/edge/edge_cases.json
+	uv run python -m src
 
 debug:
 	.venv/bin/python3 -m pdb fly_in.py

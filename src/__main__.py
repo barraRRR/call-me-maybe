@@ -1170,11 +1170,9 @@ def main() -> None:
                 )
 
         compose_output_file(model_response_list)
+        goodbye()
 
     except KeyboardInterrupt:
-        pass
-
-    finally:
         goodbye()
 
 
