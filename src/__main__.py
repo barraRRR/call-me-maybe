@@ -1,14 +1,13 @@
 from llm_sdk.llm_sdk import Small_LLM_Model
-from typing import Union, Optional, Dict, List, Tuple, Any, Protocol, Set
+from typing import Optional, Dict, List, Tuple, Any, Protocol, Set
 from pydantic import BaseModel, create_model, ValidationError
 from pydantic import Field, PrivateAttr, ConfigDict
-from pydantic_core import PydanticCustomError
 from src.utils import TOKENIZER_PATH, BASE_PROMPT_PATH, FUNC_DEF_PATH
 from src.utils import OUTPUT_PATH, FUNC_CALL_TESTS_PATH, EOS_TOKEN_ID
-from src.utils import compose_output_file, debug_output_token_list, UX_WIDTH
+from src.utils import compose_output_file, UX_WIDTH
 from src.utils import is_quote_escaped, is_complete_number, ERROR_MSG_PATH
-from src.utils import find_first_unescaped_quote, number_regex, title
-from src.utils import clear, welcome, goodbye, print_error, wait_for_enter
+from src.utils import find_first_unescaped_quote, number_regex
+from src.utils import welcome, goodbye, print_error
 from src.utils import section_header
 from src import __description__
 from enum import Enum
@@ -17,19 +16,26 @@ import numpy as np
 import json
 import argparse
 import os
-import sys
 
 
 def load_error_messages(path: str = ERROR_MSG_PATH) -> Dict[str, str]:
-    """Loads error templates from JSON or returns a fallback mapping if missing."""
+    """Loads error templates from JSON or returns a fallback mapping.
+
+    Args:
+        path (str): The error messages file path. Defaults to ERROR_MSG_PATH.
+
+    Returns:
+        Dict[str, str]: The error messages dictionary.
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         print_error(
             error_msg="error_handling.json missing or invalid.", critical=True
-            )
+        )
         return {}
+
 
 ERRORS = load_error_messages()
 
@@ -57,12 +63,12 @@ class FunctionCallResult(BaseModel):
 
 
 class FunctionSchema(BaseModel):
-    """Schema descriptor containing complete metadata for an executable function.
+    """Schema descriptor containing complete metadata for a function.
 
     Attributes:
         name (str): The unique name of the function.
         description (str): Explanatory description of the function's behavior.
-        parameters (Dict[str, ParameterInfo]): Dictionary of parameter descriptors.
+        parameters (Dict[str, ParameterInfo]): Parameter descriptors.
         returns (Dict[str, str]): Return type descriptor.
     """
     name: str
@@ -72,19 +78,19 @@ class FunctionSchema(BaseModel):
 
 
 class DynamicFunctionDefinitions(BaseModel):
-    """Handles parsing of functions definitions JSON and compiles validators dynamically.
+    """Handles parsing of functions definitions JSON and compiles validators.
 
     Attributes:
         func_def_path (str): File path to the function definitions JSON.
-        func_def_dict (Dict[str, FunctionSchema]): Map of loaded function schemas.
-        validators (Dict[str, Any]): Dynamic Pydantic validator models compiled at runtime.
+        func_def_dict (Dict[str, FunctionSchema]): Map of loaded schemas.
+        validators (Dict[str, Any]): Dynamic Pydantic validator models.
     """
     func_def_path: str
     func_def_dict: Dict[str, FunctionSchema] = Field(default_factory=dict)
     validators: Dict[str, Any] = Field(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
-        """Initializes function schemas and generates validators post instantiation."""
+        """Initializes schemas and generates validators post instantiation."""
         self._load_functions_definition()
         self._preconfigure_validators()
 
@@ -101,7 +107,7 @@ class DynamicFunctionDefinitions(BaseModel):
                 raw = json.load(file)
                 func_def_list: List[FunctionSchema] = [
                     FunctionSchema(**f) for f in raw
-                    ]
+                ]
                 self.func_def_dict.update({
                     func.name: func for func in func_def_list
                 })
@@ -119,27 +125,27 @@ class DynamicFunctionDefinitions(BaseModel):
             print_error(error_msg=error_msg, critical=True)
 
         except ValidationError as e:
-            error_msg = (
-                ERRORS["func_def_validation_error"].format(path=self.func_def_path, error=e)
+            error_msg = ERRORS["func_def_validation_error"].format(
+                path=self.func_def_path, error=e
             )
             print_error(error_msg=error_msg, critical=True)
 
     def _preconfigure_validators(self) -> None:
-        """Compiles dynamic Pydantic validation models for all loaded functions."""
+        """Compiles dynamic Pydantic validation models."""
         type_map: Dict[str, Any] = {
-                "number": float,
-                "int": int,
-                "integer": int,
-                "float": float,
-                "string": str,
-                "str": str,
-                "boolean": bool,
-                "bool": bool
-            }
+            "number": float,
+            "int": int,
+            "integer": int,
+            "float": float,
+            "string": str,
+            "str": str,
+            "boolean": bool,
+            "bool": bool
+        }
 
-        for func_name, func_schema in self.func_def_dict.items():        
+        for func_name, func_schema in self.func_def_dict.items():
             param_fields: Dict[str, Any] = {}
-            
+
             for param_name, param_info in func_schema.parameters.items():
                 python_type = type_map.get(param_info.type, Any)
                 param_fields[param_name] = (python_type, ...)
@@ -147,7 +153,7 @@ class DynamicFunctionDefinitions(BaseModel):
             ParamDynamicModel: BaseModel = create_model(
                 f"params_{func_name}",
                 **param_fields
-                )
+            )
             self.validators[func_name] = ParamDynamicModel
 
 
@@ -180,7 +186,7 @@ class UserPrompts(BaseModel):
             error_msg = (
                 ERRORS["user_prompts_not_found"].format(
                     path=self.test_prompts_path
-                    )
+                )
             )
             print_error(error_msg=error_msg, critical=True)
 
@@ -188,7 +194,7 @@ class UserPrompts(BaseModel):
             error_msg = (
                 ERRORS["user_prompts_json_error"].format(
                     path=self.test_prompts_path
-                    )
+                )
             )
             print_error(error_msg=error_msg, critical=True)
 
@@ -202,13 +208,14 @@ class UserPrompts(BaseModel):
 
 
 class BasePrompt(BaseModel):
-    """Manages the formulation and injection of context into the base LLM prompt template.
+    """Manages formulation and injection of context into base LLM prompt.
 
     Attributes:
-        func_def_dict (Dict[str, FunctionSchema]): Available function definitions dictionary.
-        prompt_path (str): File path to the base prompt template. Defaults to BASE_PROMPT_PATH.
+        func_def_dict (Dict[str, FunctionSchema]): Available definitions.
+        prompt_path (str): File path to prompt template.
+            Defaults to BASE_PROMPT_PATH.
         base_prompt_str (str): The raw base prompt string loaded from file.
-        composed_base_prompt (str): The prompt string with dynamic function schemas injected.
+        composed_base_prompt (str): Base prompt with schemas injected.
     """
     func_def_dict: Dict[str, FunctionSchema]
     prompt_path: str = BASE_PROMPT_PATH
@@ -231,12 +238,16 @@ class BasePrompt(BaseModel):
                 self.base_prompt_str = f.read()
 
         except FileNotFoundError:
-            error_msg = ERRORS["base_prompt_not_found"].format(path=self.prompt_path)
+            error_msg = ERRORS["base_prompt_not_found"].format(
+                path=self.prompt_path
+            )
             print_error(error_msg=error_msg, critical=True)
 
     def _inject_func_def(self) -> None:
-        """Injects serialized JSON representations of available function definitions."""
-        funcs_to_inject = [f.model_dump() for name, f in self.func_def_dict.items()]
+        """Injects JSON representations of available function definitions."""
+        funcs_to_inject = [
+            f.model_dump() for name, f in self.func_def_dict.items()
+        ]
         func_def_text: str = json.dumps(
             funcs_to_inject,
             separators=(',', ':'),
@@ -245,9 +256,9 @@ class BasePrompt(BaseModel):
         self.base_prompt_str = self.base_prompt_str.format(
             functions_context=func_def_text
         )
-    
+
     def compose_base_prompt(self, user_promp_str: str) -> str:
-        """Composes the final structured prompt containing system context and user query.
+        """Composes the final prompt containing context and query.
 
         Args:
             user_promp_str (str): The user query prompt.
@@ -256,7 +267,8 @@ class BasePrompt(BaseModel):
             str: The fully composed model query prompt.
         """
         self.composed_base_prompt = (
-            self.base_prompt_str + '"' + user_promp_str + '"\n' + "JSON Output:"
+            self.base_prompt_str + '"' + user_promp_str +
+            '"\n' + "JSON Output:"
         )
         return self.composed_base_prompt
 
@@ -277,16 +289,16 @@ class TokenizerMaskProtocol(Protocol):
         generated_text: str,
         logits: List[float],
         id_to_token: Dict[int, str]
-        ) -> List[float]:
-        """Masks output logits based on constraints and current generation context.
+    ) -> List[float]:
+        """Masks output logits based on constraints and current context.
 
         Args:
-            generated_text (str): The currently decoded generated text slice.
+            generated_text (str): The currently decoded text slice.
             logits (List[float]): Logits list from the model.
             id_to_token (Dict[int, str]): Token vocabulary dictionary.
 
         Returns:
-            List[float]: The modified logits list with invalid tokens masked to -inf.
+            List[float]: The modified logits list with invalid tokens masked.
         """
         ...
 
@@ -321,14 +333,14 @@ class ConstrainedJSONTracker(BaseModel):
     """State-machine based JSON state tracker for constrained decoding.
 
     Attributes:
-        func_def (DynamicFunctionDefinitions): Dynamic functions schema catalog.
+        func_def (DynamicFunctionDefinitions): Functions schema catalog.
         user_prompt (str): The natural language query. Defaults to empty.
         model (Any): The model engine. Defaults to None.
         prefix (str): Start template boundary representation.
         prefix_tokens (List[int]): Pre-tokenized prompt suffix prefix list.
         decoded_prefix (str): Decoded representation of prefix sequence.
-        param_suffix (str): Serialized prefix indicating start of parameter keys.
-        fn_suffix_tokens (Dict[str, List[int]]): Pre-tokenized function suffix map.
+        param_suffix (str): Serialized start of parameter keys.
+        fn_suffix_tokens (Dict[str, List[int]]): Pre-tokenized function suffix.
         id_to_token (Dict[int, str]): Reverse mapped token dictionary.
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -356,18 +368,20 @@ class ConstrainedJSONTracker(BaseModel):
         self.prefix_tokens = model.encode(self.prefix).flatten().tolist()
         self.decoded_prefix = model.decode(self.prefix_tokens)
         self.fn_suffix_tokens = {}
-        
+
         for fn_name in self.func_def.func_def_dict:
             full_str = self.prefix + fn_name + self.param_suffix
             full_tokens = model.encode(full_str).flatten().tolist()
-            self.fn_suffix_tokens[fn_name] = full_tokens[len(self.prefix_tokens):]
+            self.fn_suffix_tokens[fn_name] = full_tokens[
+                len(self.prefix_tokens):
+            ]
 
     def mask(
-            self,
-            generated_text: str,
-            logits: List[float],
-            id_to_token: Dict[int, str]
-            ) -> List[float]:
+        self,
+        generated_text: str,
+        logits: List[float],
+        id_to_token: Dict[int, str]
+    ) -> List[float]:
         """Applies logits constraint mask using current tracking state.
 
         Args:
@@ -389,18 +403,19 @@ class ConstrainedJSONTracker(BaseModel):
             for token_id in allowed_ids:
                 new_logits[token_id] = logits[token_id]
             return new_logits.tolist()
-            
+
         return logits
 
     @staticmethod
     def end_condition(current_text: str) -> bool:
-        """Evaluates if the generated text forms a complete parseable JSON payload.
+        """Evaluates if the text forms a complete parseable JSON payload.
 
         Args:
             current_text (str): The generated JSON text.
 
         Returns:
-            bool: True if the text parses successfully as JSON, False otherwise.
+            bool: True if the text parses successfully as JSON,
+                False otherwise.
         """
         try:
             json.loads(current_text)
@@ -438,7 +453,8 @@ class ConstrainedJSONTracker(BaseModel):
             rem (str): The remaining generated text slice.
 
         Returns:
-            Tuple[bool, Any]: (True if in name phase, the active function name string if fully matched).
+            Tuple[bool, Any]: (True if in name phase, the active function name
+                string if fully matched).
         """
         is_in_name_phase: bool = False
         active_fn: Optional[str] = None
@@ -450,11 +466,11 @@ class ConstrainedJSONTracker(BaseModel):
             elif target.startswith(rem):
                 is_in_name_phase = True
                 break
-        
+
         return (is_in_name_phase, active_fn)
 
     def _resolve_name_phase(self, rem: str) -> List[int]:
-        """Retrieves allowed tokens to continue completing the function name prefix.
+        """Retrieves tokens to continue completing the function name prefix.
 
         Args:
             rem (str): The remaining generated text slice.
@@ -480,18 +496,18 @@ class ConstrainedJSONTracker(BaseModel):
                             self.func_def.func_def_dict[fn_name].parameters
                         ):
                             if (
-                                (key + ":").startswith(key_part) or
-                                key_part.startswith(key + ":")
-                                ):
+                                (key + ":").startswith(key_part)
+                                or key_part.startswith(key + ":")
+                            ):
                                 allowed_ids.append(token_id)
                                 break
         return allowed_ids
 
     def _get_allowed_token_ids(
-            self,
-            generated_text: str,
-            ) -> List[int]:
-        """Determines the list of allowed token IDs based on current generated text state.
+        self,
+        generated_text: str,
+    ) -> List[int]:
+        """Determines allowed token IDs based on current generated text state.
 
         Args:
             generated_text (str): The complete text generated so far.
@@ -501,14 +517,14 @@ class ConstrainedJSONTracker(BaseModel):
         """
         if len(generated_text) < len(self.decoded_prefix):
             return self._build_rem_prefix(generated_text)
-        
+
         allowed_ids: List[int] = []
         rem = generated_text[len(self.decoded_prefix):]
         is_in_name_phase, active_fn = self._define_name_phase(rem)
 
         if is_in_name_phase:
             return self._resolve_name_phase(rem)
-        
+
         if active_fn is None:
             for fn_name in self.func_def.func_def_dict:
                 target = fn_name + self.param_suffix
@@ -516,7 +532,7 @@ class ConstrainedJSONTracker(BaseModel):
                     active_fn = fn_name
                     break
             return []
-        
+
         func_schema = self.func_def.func_def_dict[active_fn]
         param_text = rem[len(active_fn) + len(self.param_suffix):]
         scan_res = self._scan_parameters(param_text, func_schema)
@@ -541,10 +557,11 @@ class ConstrainedJSONTracker(BaseModel):
                             extra,
                             func_schema.parameters[K].type,
                             remaining_keys,
-                            K):
+                            K
+                        ):
                             allowed_ids.append(token_id)
                             break
-            
+
         elif state == JSONState.KEY_PARTIAL:
             for token_id, token_str in self.id_to_token.items():
                 for K in remaining_keys:
@@ -556,11 +573,14 @@ class ConstrainedJSONTracker(BaseModel):
                         elif token_str.startswith(target):
                             extra = token_str[len(target):]
                             if self._is_valid_value_prefix(
-                                extra, func_schema.parameters[K].type,
-                                remaining_keys, K):
+                                extra,
+                                func_schema.parameters[K].type,
+                                remaining_keys,
+                                K
+                            ):
                                 allowed_ids.append(token_id)
                                 break
-        
+
         elif state == JSONState.COLON_START:
             for token_id, token_str in self.id_to_token.items():
                 if ":".startswith(token_str):
@@ -571,7 +591,8 @@ class ConstrainedJSONTracker(BaseModel):
                         extra,
                         func_schema.parameters[current_key].type,
                         remaining_keys,
-                        current_key):
+                        current_key
+                    ):
                         allowed_ids.append(token_id)
 
         elif state == JSONState.VALUE_START:
@@ -580,14 +601,23 @@ class ConstrainedJSONTracker(BaseModel):
                     token_str,
                     param_type,
                     remaining_keys,
-                    current_key):
+                    current_key
+                ):
                     allowed_ids.append(token_id)
 
         elif state == JSONState.VALUE_PARTIAL:
             if param_type == 'string':
                 for token_id, token_str in self.id_to_token.items():
                     clean_token = token_str.replace('Ġ', '').lstrip()
-                    if current_key == "regex" and partial_value == "" and (clean_token.startswith('.') or clean_token.startswith('*')):
+                    is_regex_start = (
+                        clean_token.startswith('.')
+                        or clean_token.startswith('*')
+                    )
+                    if (
+                        current_key == "regex"
+                        and partial_value == ""
+                        and is_regex_start
+                    ):
                         continue
                     idx = find_first_unescaped_quote(token_str)
                     if idx == -1:
@@ -595,18 +625,20 @@ class ConstrainedJSONTracker(BaseModel):
                     else:
                         extra = token_str[idx+1:]
                         if self._is_valid_separator_prefix(
-                            extra, remaining_keys):
+                            extra, remaining_keys
+                        ):
                             allowed_ids.append(token_id)
-                            
+
             elif param_type == 'number':
                 for token_id, token_str in self.id_to_token.items():
                     if number_regex.match(partial_value + token_str):
                         allowed_ids.append(token_id)
                     elif is_complete_number(partial_value):
                         if self._is_valid_separator_prefix(
-                            token_str, remaining_keys):
+                            token_str, remaining_keys
+                        ):
                             allowed_ids.append(token_id)
-                            
+
             elif param_type in ('boolean', 'bool'):
                 target = 'true' if partial_value.startswith('t') else 'false'
                 for token_id, token_str in self.id_to_token.items():
@@ -616,13 +648,15 @@ class ConstrainedJSONTracker(BaseModel):
                           (partial_value + token_str).startswith(target)):
                         extra = (partial_value + token_str)[len(target):]
                         if self._is_valid_separator_prefix(
-                            extra, remaining_keys):
+                            extra, remaining_keys
+                        ):
                             allowed_ids.append(token_id)
 
         elif state == JSONState.COMMA_OR_CLOSE_START:
             for token_id, token_str in self.id_to_token.items():
                 if self._is_valid_separator_prefix(
-                    token_str, remaining_keys):
+                    token_str, remaining_keys
+                ):
                     allowed_ids.append(token_id)
 
         elif state == JSONState.CLOSED:
@@ -636,24 +670,25 @@ class ConstrainedJSONTracker(BaseModel):
         return allowed_ids
 
     def _scan_parameters(
-            self,
-            param_text: str,
-            func_schema: FunctionSchema) -> Dict[str, Any]:
-        """Scans the generated parameters string to parse the state of the JSON.
+        self,
+        param_text: str,
+        func_schema: FunctionSchema
+    ) -> Dict[str, Any]:
+        """Scans generated parameters string to parse the state of the JSON.
 
         Args:
-            param_text (str): The parameters dictionary substring generated so far.
-            func_schema (FunctionSchema): The schema of the currently selected function.
+            param_text (str): The parameter substring generated so far.
+            func_schema (FunctionSchema): The schema of the active function.
 
         Returns:
-            Dict[str, Any]: A dictionary containing parsing state metrics (state, remaining keys, partial/current keys, value type, etc.).
+            Dict[str, Any]: A dictionary containing parsing state metrics.
         """
         remaining_keys: Set[str] = set(func_schema.parameters.keys())
         idx: int = 0
         n: int = len(param_text)
         current_key: str = None
         state: JSONState = JSONState.KEY
-        
+
         while idx < n:
             if state == JSONState.KEY:
                 if param_text[idx] == '"':
@@ -749,7 +784,7 @@ class ConstrainedJSONTracker(BaseModel):
                     }
                 else:
                     idx += 1
-                    
+
         if state == JSONState.KEY:
             return {
                 'state': JSONState.KEY_START,
@@ -777,28 +812,34 @@ class ConstrainedJSONTracker(BaseModel):
         return {'state': JSONState.ERROR}
 
     def _is_valid_value_prefix(
-            self,
-            extra: str,
-            param_type: str,
-            remaining_keys: str,
-            current_key: Optional[str] = None) -> bool:
-        """Checks if a suffix string matches a valid prefix for parameter values.
+        self,
+        extra: str,
+        param_type: str,
+        remaining_keys: str,
+        current_key: Optional[str] = None
+    ) -> bool:
+        """Checks if a suffix string matches a valid prefix for values.
 
         Args:
             extra (str): The suffix string to evaluate.
-            param_type (str): The expected parameter type (string, number, boolean).
+            param_type (str): The expected parameter type.
             remaining_keys (str): Set of remaining parameter keys.
-            current_key (Optional[str]): The parameter key currently being processed.
+            current_key (Optional[str]): The parameter key currently processed.
 
         Returns:
-            bool: True if the suffix is a valid value prefix representation, False otherwise.
+            bool: True if the suffix is a valid value prefix representation,
+                False otherwise.
         """
         if param_type == "string":
             if '"'.startswith(extra):
                 return True
             if extra.startswith('"'):
                 val_part = extra[1:]
-                if current_key == "regex" and (val_part.startswith('.') or val_part.startswith('*')):
+                is_reg_pre = (
+                    val_part.startswith('.')
+                    or val_part.startswith('*')
+                )
+                if current_key == "regex" and is_reg_pre:
                     return False
                 idx = find_first_unescaped_quote(val_part)
                 if idx == -1:
@@ -806,13 +847,14 @@ class ConstrainedJSONTracker(BaseModel):
                 else:
                     sep_part = val_part[idx+1:]
                     return self._is_valid_separator_prefix(
-                        sep_part, remaining_keys)
+                        sep_part, remaining_keys
+                    )
             return False
-        
+
         elif param_type == "number":
             if number_regex.match(extra):
                 return True
-            
+
             for i in range(len(extra)):
                 if extra[i] in ',}':
                     num_part = extra[:i]
@@ -822,7 +864,7 @@ class ConstrainedJSONTracker(BaseModel):
                             sep_part, remaining_keys)):
                         return True
             return False
-        
+
         elif param_type in ("boolean", "bool"):
             for target in ("true", "false"):
                 if target.startswith(extra):
@@ -830,16 +872,18 @@ class ConstrainedJSONTracker(BaseModel):
                 if extra.startswith(target):
                     sep_part = extra[len(target):]
                     if self._is_valid_separator_prefix(
-                        sep_part, remaining_keys):
+                        sep_part, remaining_keys
+                    ):
                         return True
 
             return False
         return False
 
     def _is_valid_separator_prefix(
-            self,
-            extra: str,
-            remaining_keys: Set[str]) -> bool:
+        self,
+        extra: str,
+        remaining_keys: Set[str]
+    ) -> bool:
         """Checks if a suffix matches a valid separator or closing structure.
 
         Args:
@@ -847,7 +891,8 @@ class ConstrainedJSONTracker(BaseModel):
             remaining_keys (Set[str]): Set of remaining parameter keys.
 
         Returns:
-            bool: True if the suffix matches a valid separator, False otherwise.
+            bool: True if the suffix matches a valid separator,
+                False otherwise.
         """
         if not remaining_keys:
             return "}}".startswith(extra) or extra.startswith("}}")
@@ -863,21 +908,24 @@ class ConstrainedJSONTracker(BaseModel):
             if next_extra.startswith('"'):
                 key_part = next_extra[1:]
                 for K in remaining_keys:
-                    if ((K + '":').startswith(key_part) or
-                        key_part.startswith(K + '":')):
+                    is_match = (
+                        (K + '":').startswith(key_part)
+                        or key_part.startswith(K + '":')
+                    )
+                    if is_match:
                         return True
 
         return False
 
 
 class ModelEngine(BaseModel):
-    """Execution engine wrapping the LLM model and managing tokenizer configurations.
+    """Execution engine wrapping LLM and managing tokenizer configurations.
 
     Attributes:
-        model_name (str): The identifier name of the model weights. Defaults to Qwen/Qwen3-0.6B.
+        model_name (str): Model weights name. Defaults to Qwen/Qwen3-0.6B.
         vocab_dict (Dict[str, int]): Map of vocabulary tokens to IDs.
-        id_to_token (Dict[int, str]): Reverse lookup of vocabulary token IDs to strings.
-        id_to_token_decoded (Dict[int, str]): Token strings containing correct space/carriage mappings.
+        id_to_token (Dict[int, str]): Reverse lookup of token IDs to strings.
+        id_to_token_decoded (Dict[int, str]): Token strings with mappings.
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -888,13 +936,13 @@ class ModelEngine(BaseModel):
     _model: Small_LLM_Model = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
-        """Loads model weights, tokenizer file, and maps the vocabulary structures."""
+        """Loads model weights, tokenizer file, and maps vocabulary."""
         self._model = Small_LLM_Model(model_name=self.model_name)
 
         if os.path.exists(TOKENIZER_PATH):
             with open(TOKENIZER_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        
+
         else:
             tokenizer = self._model.get_path_to_tokenizer_file()
             with open(tokenizer, "r", encoding="utf-8") as f:
@@ -903,13 +951,14 @@ class ModelEngine(BaseModel):
             os.makedirs(os.path.dirname(TOKENIZER_PATH), exist_ok=True)
             with open(TOKENIZER_PATH, "w") as f:
                 json.dump(data, f, indent=2)
-        
+
         self.vocab_dict.update(data["model"]["vocab"])
         self.id_to_token.update({
             v: k for k, v in self.vocab_dict.items()
         })
         self.id_to_token_decoded.update({
-            v: k.replace('Ġ', ' ').replace('Ċ', '\n') for k, v in self.vocab_dict.items()
+            v: k.replace('Ġ', ' ').replace('Ċ', '\n')
+            for k, v in self.vocab_dict.items()
         })
 
     def encode(self, text: str) -> Any:
@@ -946,39 +995,33 @@ class ModelEngine(BaseModel):
         return self._model.get_logits_from_input_ids(input_ids)
 
     def generate(
-            self,
-            tracker: Optional[TokenizerMaskProtocol],
-            prompt: str,
-            base_prompt_str: Optional[str] = None,
-            max_new_tokens: int = 50,
-            answer_str: str = "ANSWER: ",
-            printable: bool = False
-            ) -> str:
-        """Executes guided autoregressive token generation using tracker constraints.
+        self,
+        tracker: Optional[TokenizerMaskProtocol],
+        prompt: str,
+        base_prompt_str: Optional[str] = None,
+        max_new_tokens: int = 50,
+        answer_str: str = "ANSWER: ",
+        printable: bool = False
+    ) -> str:
+        """Autoregressive token generation using tracker constraints.
 
         Args:
-            tracker (Optional[TokenizerMaskProtocol]): The logits constraint tracker.
+            tracker (Optional[TokenizerMaskProtocol]): The constraint tracker.
             prompt (str): The query prompt.
             base_prompt_str (Optional[str]): System prompt base template.
             max_new_tokens (int): The maximum tokens limit. Defaults to 50.
             answer_str (str): Visual logging prefix. Defaults to "ANSWER: ".
-            printable (bool): If True, prints token generations in real time. Defaults to False.
+            printable (bool): If True, prints tokens. Defaults to False.
 
         Returns:
             str: The generated text response.
         """
-        if base_prompt_str:
-            base_prompt_tokens = (
-                self.encode(base_prompt_str).flatten().tolist()
-            )
-            len_base_prompt = len(base_prompt_tokens)
-            
         prompt_tokens = self.encode(prompt).flatten().tolist()
         len_prompt = len(prompt_tokens)
         tokens_list = prompt_tokens.copy()
 
         for _ in range(max_new_tokens):
-            
+
             generated_tokens = tokens_list[len_prompt:]
             generated_text = self.decode(generated_tokens)
             logits = self.get_logits_from_input_ids(tokens_list)
@@ -988,10 +1031,12 @@ class ModelEngine(BaseModel):
                     logits = tracker.mask(
                         generated_text=generated_text,
                         logits=logits,
-                        id_to_token=self.id_to_token_decoded)
+                        id_to_token=self.id_to_token_decoded
+                    )
 
                 next_token = int(np.argmax(logits))
-                if next_token == EOS_TOKEN_ID: break
+                if next_token == EOS_TOKEN_ID:
+                    break
                 tokens_list.append(next_token)
                 current_text = self.decode(tokens_list[len_prompt:])
 
@@ -1001,29 +1046,30 @@ class ModelEngine(BaseModel):
                 if tracker and tracker.end_condition(current_text):
                     break
 
-                else: continue
-
             except Exception as e:
-                print_error(error_msg=f"Model generation error: {e}", critical=False)
+                print_error(
+                    error_msg=f"Model generation error: {e}",
+                    critical=False
+                )
                 break
 
         return self.decode(tokens_list[len_prompt:])
-    
+
     def test_model(
-            self,
-            tracker: Optional[TokenizerMaskProtocol],
-            prompt: BasePrompt,
-            test: str,
-            test_num: int = 0,
-            max_new_tokens: int = 50
-            ) -> str:
+        self,
+        tracker: Optional[TokenizerMaskProtocol],
+        prompt: BasePrompt,
+        test: str,
+        test_num: int = 0,
+        max_new_tokens: int = 50
+    ) -> str:
         """Runs generation test for a single query prompt.
 
         Args:
-            tracker (Optional[TokenizerMaskProtocol]): The logits constraint tracker.
+            tracker (Optional[TokenizerMaskProtocol]): The constraint tracker.
             prompt (BasePrompt): The formatted system prompt manager.
             test (str): The user query.
-            test_num (int): Visual indicator test identifier index. Defaults to 0.
+            test_num (int): Visual indicator test identifier. Defaults to 0.
             max_new_tokens (int): The token limit. Defaults to 50.
 
         Returns:
@@ -1038,13 +1084,14 @@ class ModelEngine(BaseModel):
             tracker=tracker,
             prompt=composed_prompt,
             max_new_tokens=max_new_tokens,
-            printable=True)
+            printable=True
+        )
 
         return generated_text
 
 
 def main() -> None:
-    """CLI entrypoint loading resources, configuring targets, and executing predictions."""
+    """CLI entrypoint loading resources and executing predictions."""
     parser = argparse.ArgumentParser(description=__description__)
     parser.add_argument("--functions_definition", default=FUNC_DEF_PATH)
     parser.add_argument("--input", default=FUNC_CALL_TESTS_PATH)
@@ -1054,7 +1101,9 @@ def main() -> None:
     try:
         welcome()
         section_header("LOADING IO FILES")
-        func_def = DynamicFunctionDefinitions(func_def_path=arg.functions_definition)
+        func_def = DynamicFunctionDefinitions(
+            func_def_path=arg.functions_definition
+        )
         print(f"• Loading function schemas from {arg.functions_definition}...")
         user_prompts = UserPrompts(test_prompts_path=arg.input)
         print(f"• Loading test prompts from {arg.input}...")
@@ -1079,24 +1128,34 @@ def main() -> None:
                 test=test,
                 test_num=i,
                 max_new_tokens=100
-                )
-            
+            )
+
             try:
                 dict_response = json.loads(generated_text)
                 fn_name = dict_response.get("name")
                 if not fn_name or fn_name not in func_def.validators:
-                    raise ValueError(ERRORS["unknown_fn_error"].format(fn_name=fn_name))
-                
-                validated_params = func_def.validators[fn_name](**dict_response.get("parameters", {}))
+                    raise ValueError(
+                        ERRORS["unknown_fn_error"].format(fn_name=fn_name)
+                    )
+
+                validated_params = func_def.validators[fn_name](
+                    **dict_response.get("parameters", {})
+                )
                 dict_response["parameters"] = validated_params.model_dump()
                 model_response_list.append(dict_response)
-            
+
             except json.JSONDecodeError as e:
-                print_error(error_msg=ERRORS["json_decode_error"].format(error=e), critical=False)
+                print_error(
+                    error_msg=ERRORS["json_decode_error"].format(error=e),
+                    critical=False
+                )
 
             except Exception as e:
-                print_error(error_msg=ERRORS["validation_error"].format(error=e), critical=False)
-            
+                print_error(
+                    error_msg=ERRORS["validation_error"].format(error=e),
+                    critical=False
+                )
+
         compose_output_file(model_response_list)
 
     except KeyboardInterrupt:

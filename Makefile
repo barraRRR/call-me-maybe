@@ -1,16 +1,32 @@
-.PHONY: install run run-edge debug clean lint lint-strict
+.PHONY: install fetch-files-home fetch-files-42 run run-edge debug clean lint lint-strict
 
 install:
+	uv venv
+	uv sync
+
+fetch-files-home:
 	rm -f en.subject.pdf
-	curl -LO https://cdn.intra.42.fr/pdf/pdf/206639/en.subject.pdf
-	curl -LO https://cdn.intra.42.fr/document/document/49768/data.zip
-	curl -LO https://cdn.intra.42.fr/document/document/49769/llm_sdk.zip
+	rm -f data.zip
+	rm -f llm_sdk.zip
+	curl -O https://cdn.intra.42.fr/pdf/pdf/206639/en.subject.pdf
+	curl -O https://cdn.intra.42.fr/document/document/49768/data.zip
+	curl -O https://cdn.intra.42.fr/document/document/49769/llm_sdk.zip
 	unzip -u data.zip
 	unzip -u llm_sdk.zip
 	rm -f data.zip
 	rm -f llm_sdk.zip
-	uv venv
-	uv sync
+
+fetch-files-42:
+	rm -f en.subject.pdf
+	rm -f data.zip
+	rm -f llm_sdk.zip
+	wget https://cdn.intra.42.fr/pdf/pdf/206639/en.subject.pdf
+	wget https://cdn.intra.42.fr/document/document/49768/data.zip
+	wget https://cdn.intra.42.fr/document/document/49769/llm_sdk.zip
+	unzip -u data.zip
+	unzip -u llm_sdk.zip
+	rm -f data.zip
+	rm -f llm_sdk.zip
 
 run:
 	uv run python -m src
