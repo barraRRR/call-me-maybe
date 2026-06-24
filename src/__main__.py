@@ -1,5 +1,5 @@
 from llm_sdk.llm_sdk import Small_LLM_Model
-from typing import Optional, Dict, List, Tuple, Any, Protocol, Set
+from typing import Optional, Dict, List, Tuple, Any, Protocol, Set, cast
 from pydantic import BaseModel, create_model, ValidationError
 from pydantic import Field, PrivateAttr, ConfigDict
 from src.utils import TOKENIZER_PATH, BASE_PROMPT_PATH, FUNC_DEF_PATH
@@ -29,7 +29,7 @@ def load_error_messages(path: str = ERROR_MSG_PATH) -> Dict[str, str]:
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return cast(Dict[str, str], json.load(f))
     except Exception:
         print_error(
             error_msg="error_handling.json missing or invalid.", critical=True
@@ -90,7 +90,10 @@ class DynamicFunctionDefinitions(BaseModel):
     validators: Dict[str, Any] = Field(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
-        """Initializes schemas and generates validators post instantiation."""
+        """Initializes function schemas and generates validators.
+
+        Runs post-instantiation.
+        """
         self._load_functions_definition()
         self._preconfigure_validators()
 
@@ -402,7 +405,7 @@ class ConstrainedJSONTracker(BaseModel):
             new_logits = np.full_like(logits, -float("inf"))
             for token_id in allowed_ids:
                 new_logits[token_id] = logits[token_id]
-            return new_logits.tolist()
+            return cast(List[float], new_logits.tolist())
 
         return logits
 
@@ -536,13 +539,13 @@ class ConstrainedJSONTracker(BaseModel):
         func_schema = self.func_def.func_def_dict[active_fn]
         param_text = rem[len(active_fn) + len(self.param_suffix):]
         scan_res = self._scan_parameters(param_text, func_schema)
-        state = scan_res.get("state")
-        remaining_keys = scan_res.get("remaining_keys")
-        partial_key = scan_res.get("partial_key")
-        current_key = scan_res.get("current_key")
-        param_type = scan_res.get("type")
-        partial_value = scan_res.get("partial_value")
-        remaining_text = scan_res.get("remaining_text")
+        state: Optional[JSONState] = scan_res.get("state")
+        remaining_keys: Set[str] = scan_res.get("remaining_keys") or set()
+        partial_key: str = scan_res.get("partial_key") or ""
+        current_key: Optional[str] = scan_res.get("current_key")
+        param_type: str = scan_res.get("type") or ""
+        partial_value: str = scan_res.get("partial_value") or ""
+        remaining_text: str = scan_res.get("remaining_text") or ""
 
         if state == JSONState.KEY_START:
             for token_id, token_str in self.id_to_token.items():
@@ -582,6 +585,8 @@ class ConstrainedJSONTracker(BaseModel):
                                 break
 
         elif state == JSONState.COLON_START:
+            if current_key is None:
+                return []
             for token_id, token_str in self.id_to_token.items():
                 if ":".startswith(token_str):
                     allowed_ids.append(token_id)
@@ -596,6 +601,8 @@ class ConstrainedJSONTracker(BaseModel):
                         allowed_ids.append(token_id)
 
         elif state == JSONState.VALUE_START:
+            if current_key is None:
+                return []
             for token_id, token_str in self.id_to_token.items():
                 if self._is_valid_value_prefix(
                     token_str,
@@ -606,6 +613,8 @@ class ConstrainedJSONTracker(BaseModel):
                     allowed_ids.append(token_id)
 
         elif state == JSONState.VALUE_PARTIAL:
+            if current_key is None:
+                return []
             if param_type == 'string':
                 for token_id, token_str in self.id_to_token.items():
                     clean_token = token_str.replace('Ġ', '').lstrip()
@@ -686,7 +695,7 @@ class ConstrainedJSONTracker(BaseModel):
         remaining_keys: Set[str] = set(func_schema.parameters.keys())
         idx: int = 0
         n: int = len(param_text)
-        current_key: str = None
+        current_key: Optional[str] = None
         state: JSONState = JSONState.KEY
 
         while idx < n:
@@ -716,6 +725,8 @@ class ConstrainedJSONTracker(BaseModel):
                 else:
                     idx += 1
             elif state == JSONState.VALUE:
+                if current_key is None:
+                    return {'state': JSONState.ERROR}
                 param_type = func_schema.parameters[current_key].type
                 if param_type == 'string':
                     if param_text[idx] == '"':
@@ -797,6 +808,8 @@ class ConstrainedJSONTracker(BaseModel):
                 'current_key': current_key
             }
         elif state == JSONState.VALUE:
+            if current_key is None:
+                return {'state': JSONState.ERROR}
             param_type = func_schema.parameters[current_key].type
             return {
                 'state': JSONState.VALUE_START,
@@ -815,7 +828,7 @@ class ConstrainedJSONTracker(BaseModel):
         self,
         extra: str,
         param_type: str,
-        remaining_keys: str,
+        remaining_keys: Set[str],
         current_key: Optional[str] = None
     ) -> bool:
         """Checks if a suffix string matches a valid prefix for values.
@@ -823,7 +836,7 @@ class ConstrainedJSONTracker(BaseModel):
         Args:
             extra (str): The suffix string to evaluate.
             param_type (str): The expected parameter type.
-            remaining_keys (str): Set of remaining parameter keys.
+            remaining_keys (Set[str]): Set of remaining parameter keys.
             current_key (Optional[str]): The parameter key currently processed.
 
         Returns:

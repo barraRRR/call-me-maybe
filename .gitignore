@@ -10,3 +10,4 @@ moulinette
 eva_sheet.pdf
 .DS_Store
 .mypy_cache
+data/output
