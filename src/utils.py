@@ -6,7 +6,7 @@ import re
 
 
 TOKENIZER_PATH = "src/tokenizer.json"
-BASE_PROMPT_PATH = "src/base_prompt.txt"
+BASE_PROMPT_PATH = "src/BASE_PROMPT.txt"
 FUNC_DEF_PATH = "data/input/functions_definition.json"
 FUNC_CALL_TESTS_PATH = "data/input/function_calling_tests.json"
 OUTPUT_PATH = "data/output/function_calls.json"
