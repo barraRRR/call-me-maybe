@@ -3,6 +3,7 @@
 # call me maybe
 
 <div align="center">
+<img width="400" height="300" alt="call-me-maybe-logo-clean" src="https://github.com/user-attachments/assets/e334dba5-5ce2-4d9f-a6a5-715c203a43c2" />
 
 ### *☎️ here's my prompt, so call me maybe*
 ![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)
