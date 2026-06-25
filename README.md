@@ -3,12 +3,17 @@
 # call me maybe
 
 <div align="center">
-
+<img width="684" height="387" alt="call-me-baybe_kv" src="https://github.com/user-attachments/assets/f70990ca-d7a9-44bb-84d4-90abf4190b6f" />
+  
 ### *☎️ here's my prompt, so call me maybe*
 ![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)
 ![Python Versions](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
+![42 School](https://img.shields.io/badge/school-42-black?logo=42&logoColor=white)
+![Success](https://img.shields.io/badge/success-111%2F100-green.svg)
+![Qwen](https://img.shields.io/badge/LLM-Qwen-orange?logo=alibabacloud&logoColor=white)
+
 
 </div>
 
