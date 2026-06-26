@@ -1,8 +1,9 @@
+<div align="center">
+
 *This project has been created as part of the 42 curriculum by jbarreir.*
 
 # call me maybe
 
-<div align="center">
 <img width="684" height="387" alt="call-me-baybe_kv" src="https://github.com/user-attachments/assets/f70990ca-d7a9-44bb-84d4-90abf4190b6f" />
   
 ### *☎️ here's my prompt, so call me maybe*
