@@ -1,6 +1,5 @@
 <div align="center">
 
-*This project has been created as part of the 42 curriculum by jbarreir.*
 
 # call me maybe
 
